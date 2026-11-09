@@ -82,9 +82,13 @@ export function restoreCanvas(raw: unknown): CanvasFile {
   return { nodes, edges, meta: doc.meta && typeof doc.meta === 'object' ? doc.meta : {} }
 }
 
+const HISTORY_LIMIT = 100
+
 export class DocumentStore {
   private doc: CanvasFile = { nodes: [], edges: [], meta: { name: '未命名画布', app: 'whiteboard', appVersion: '0.1.0' } }
   private listeners = new Set<Listener>()
+  private past: CanvasFile[] = []
+  private future: CanvasFile[] = []
 
   subscribe = (l: Listener) => {
     this.listeners.add(l)
@@ -96,8 +100,43 @@ export class DocumentStore {
     this.listeners.forEach((l) => l())
   }
 
+  private clone(): CanvasFile {
+    return JSON.parse(JSON.stringify(this.doc))
+  }
+
+  checkpoint() {
+    this.past.push(this.clone())
+    if (this.past.length > HISTORY_LIMIT) this.past.shift()
+    this.future = []
+  }
+
+  undo() {
+    const prev = this.past.pop()
+    if (!prev) return
+    this.future.push(this.clone())
+    this.doc = prev
+    this.emit()
+  }
+
+  redo() {
+    const next = this.future.pop()
+    if (!next) return
+    this.past.push(this.clone())
+    this.doc = next
+    this.emit()
+  }
+
+  canUndo() {
+    return this.past.length > 0
+  }
+  canRedo() {
+    return this.future.length > 0
+  }
+
   load(file: CanvasFile) {
     this.doc = restoreCanvas(file)
+    this.past = []
+    this.future = []
     this.emit()
   }
   toJSON(): CanvasFile {
@@ -112,11 +151,13 @@ export class DocumentStore {
   }
 
   addNode(node: CanvasNode) {
+    this.checkpoint()
     this.doc = { ...this.doc, nodes: [...(this.doc.nodes ?? []), node] }
     this.emit()
     return node
   }
-  updateNode(id: string, patch: Partial<CanvasNode>) {
+  updateNode(id: string, patch: Partial<CanvasNode>, opts?: { transient?: boolean }) {
+    if (!opts?.transient) this.checkpoint()
     this.doc = {
       ...this.doc,
       nodes: (this.doc.nodes ?? []).map((n) => (n.id === id ? ({ ...n, ...patch, id: n.id, type: n.type } as CanvasNode) : n)),
@@ -124,6 +165,7 @@ export class DocumentStore {
     this.emit()
   }
   deleteNode(id: string) {
+    this.checkpoint()
     this.doc = {
       ...this.doc,
       nodes: (this.doc.nodes ?? []).filter((n) => n.id !== id),
@@ -133,11 +175,13 @@ export class DocumentStore {
   }
 
   addEdge(edge: CanvasEdge) {
+    this.checkpoint()
     this.doc = { ...this.doc, edges: [...(this.doc.edges ?? []), edge] }
     this.emit()
     return edge
   }
   updateEdge(id: string, patch: Partial<CanvasEdge>) {
+    this.checkpoint()
     this.doc = {
       ...this.doc,
       edges: (this.doc.edges ?? []).map((e) => (e.id === id ? { ...e, ...patch, id: e.id } : e)),
@@ -145,6 +189,7 @@ export class DocumentStore {
     this.emit()
   }
   deleteEdge(id: string) {
+    this.checkpoint()
     this.doc = { ...this.doc, edges: (this.doc.edges ?? []).filter((e) => e.id !== id) }
     this.emit()
   }

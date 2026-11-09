@@ -55,6 +55,22 @@ function Card(props: {
     }
   }, [props.editing])
 
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const measure = () => {
+      const zoom = props.camera.zoom || 1
+      const h = Math.ceil((el.offsetHeight + 16) / zoom)
+      if (Math.abs(h - props.node.height) > 2) {
+        documentStore.updateNode(props.node.id, { height: h }, { transient: true })
+      }
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [props.node.id, props.node.text, props.camera.zoom])
+
   const left = node.x * camera.zoom + camera.x
   const top = node.y * camera.zoom + camera.y
 
