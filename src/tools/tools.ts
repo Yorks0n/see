@@ -94,6 +94,7 @@ export const tools: Record<ToolId, Tool> = {
         const sel = env.selection.has(hit.id) ? new Set(env.selection) : new Set([hit.id])
         env.setSelection(sel)
         documentStore.bringToFront(hit.id)
+        documentStore.checkpoint()
         const origins = new Map<string, { x: number; y: number }>()
         for (const id of sel) {
           const n = documentStore.getNode(id)
@@ -125,7 +126,7 @@ export const tools: Record<ToolId, Tool> = {
         if (Math.abs(dx) + Math.abs(dy) > 0.5) d.moved = true
         if (d.moved) {
           for (const [id, origin] of d.origins) {
-            documentStore.updateNode(id, { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) })
+            documentStore.updateNode(id, { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) }, { transient: true })
           }
         }
       } else if (d.type === 'marquee' && d.rect) {

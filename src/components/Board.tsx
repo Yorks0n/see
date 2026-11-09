@@ -92,9 +92,29 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
 
   const currentTool = tools[props.tool]
   const state = toolStateRef.current
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>())
+  const pinchRef = useRef<{ startDist: number; startZoom: number; startMid: { x: number; y: number }; startCam: { x: number; y: number } } | null>(null)
 
   const onPointerDown = (e: React.PointerEvent) => {
     containerRef.current?.setPointerCapture(e.pointerId)
+    const rect = containerRef.current!.getBoundingClientRect()
+    pointersRef.current.set(e.pointerId, { x: e.clientX - rect.left, y: e.clientY - rect.top })
+    if (pointersRef.current.size === 2) {
+      const [a, b] = [...pointersRef.current.values()]
+      const cam = cameraStore.getSnapshot()
+      pinchRef.current = {
+        startDist: Math.hypot(a.x - b.x, a.y - b.y),
+        startZoom: cam.zoom,
+        startMid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+        startCam: { x: cam.x, y: cam.y },
+      }
+      state.dragging = null
+      setDragPreview(null)
+      setMarquee(null)
+      setActiveStroke(null)
+      return
+    }
+    if (pointersRef.current.size > 2) return
     if (e.button === 1 || props.tool === 'hand') {
       tools.hand.onPointerDown?.(toPointerInfo(e), env, state)
       return
@@ -104,6 +124,26 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
     if (state.dragging?.type === 'draw') setActiveStroke(state.dragging.points ?? null)
   }
   const onPointerMove = (e: React.PointerEvent) => {
+    const rect = containerRef.current!.getBoundingClientRect()
+    const p = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    if (pointersRef.current.has(e.pointerId)) pointersRef.current.set(e.pointerId, p)
+    if (pointersRef.current.size >= 2 && pinchRef.current) {
+      const pts = [...pointersRef.current.values()]
+      const a = pts[0]
+      const b = pts[1]
+      const dist = Math.hypot(a.x - b.x, a.y - b.y)
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+      const pinch = pinchRef.current
+      if (pinch.startDist > 0) {
+        const zoom = Math.min(4, Math.max(0.1, pinch.startZoom * (dist / pinch.startDist)))
+        const world = {
+          x: (pinch.startMid.x - pinch.startCam.x) / pinch.startZoom,
+          y: (pinch.startMid.y - pinch.startCam.y) / pinch.startZoom,
+        }
+        cameraStore.set({ zoom, x: mid.x - world.x * zoom, y: mid.y - world.y * zoom })
+      }
+      return
+    }
     const info = toPointerInfo(e)
     if (state.dragging?.type === 'pan') {
       tools.hand.onPointerMove?.(info, env, state)
@@ -113,6 +153,8 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
     if (state.dragging?.type === 'draw') setActiveStroke([...(state.dragging.points ?? [])])
   }
   const onPointerUp = (e: React.PointerEvent) => {
+    pointersRef.current.delete(e.pointerId)
+    if (pointersRef.current.size < 2) pinchRef.current = null
     const info = toPointerInfo(e)
     if (state.dragging?.type === 'pan') {
       tools.hand.onPointerUp?.(info, env, state)
@@ -147,6 +189,17 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
   const onKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (editingId) return
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) documentStore.redo()
+        else documentStore.undo()
+        return
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault()
+        documentStore.redo()
+        return
+      }
       const map: Record<string, ToolId> = { v: 'select', h: 'hand', c: 'card', l: 'connect', b: 'box', d: 'draw' }
       const t = map[e.key.toLowerCase()]
       if (t) props.setTool(t)
@@ -179,6 +232,9 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
       <canvas ref={staticRef} className="canvas static" />
       <canvas ref={interactiveRef} className="canvas interactive" />
       <CardLayer doc={doc} camera={camera} selection={selection} editingId={editingId} setEditingId={setEditingId} />
+      {(doc.nodes ?? []).length === 0 && (
+        <div className="empty-hint">双击空白处创建第一张卡片 · 滚轮缩放 · 中键拖动平移</div>
+      )}
     </div>
   )
 }
