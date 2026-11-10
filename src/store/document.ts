@@ -7,7 +7,7 @@ const uid = () =>
 
 const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
-const NODE_TYPES = new Set(['text', 'file', 'link', 'group', 'draw'])
+const NODE_TYPES = new Set(['text', 'file', 'link', 'image', 'group', 'draw'])
 const SIDES: NodeSide[] = ['top', 'right', 'bottom', 'left']
 
 export function restoreNode(raw: unknown): CanvasNode | null {
@@ -32,6 +32,13 @@ export function restoreNode(raw: unknown): CanvasNode | null {
       return { ...base, type: 'file', file: typeof n.file === 'string' ? n.file : '' }
     case 'link':
       return { ...base, type: 'link', url: typeof n.url === 'string' ? n.url : '' }
+    case 'image':
+      return {
+        ...base,
+        type: 'image',
+        url: typeof n.url === 'string' ? n.url : '',
+        text: typeof n.text === 'string' ? n.text : undefined,
+      }
     case 'group':
       return { ...base, type: 'group', label: typeof n.label === 'string' ? n.label : undefined }
     case 'draw': {

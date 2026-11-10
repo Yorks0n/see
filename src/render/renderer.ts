@@ -2,7 +2,7 @@ import type { Camera } from '../store/camera'
 import type { CanvasEdge, CanvasFile, CanvasNode, DrawNode, GroupNode, NodeSide } from '../types'
 import { buildGrid, type Rect } from '../hit/grid'
 
-const PRESET_COLORS: Record<string, string> = {
+export const PRESET_COLORS: Record<string, string> = {
   '1': '#e03131',
   '2': '#f08c00',
   '3': '#f7d154',
@@ -91,7 +91,7 @@ export function renderStaticScene(ctx: CanvasRenderingContext2D, env: RenderEnv,
   for (const n of others) {
     if (n.type === 'draw') {
       drawStroke(ctx, n, camera.zoom)
-    } else if (n.type !== 'text') {
+    } else if (n.type !== 'text' && n.type !== 'image') {
       ctx.fillStyle = resolveColor(n.color, '#ffffff')
       ctx.strokeStyle = '#adb5bd'
       ctx.lineWidth = 1.5 / camera.zoom
@@ -133,6 +133,7 @@ export function renderInteractiveScene(ctx: CanvasRenderingContext2D, env: Rende
   for (const id of selection) {
     const n = byId.get(id)
     if (!n) continue
+    if (n.type === 'text' || n.type === 'image') continue
     ctx.strokeStyle = '#4dabf7'
     ctx.lineWidth = lw
     roundRect(ctx, n.x - 3 / camera.zoom, n.y - 3 / camera.zoom, n.width + 6 / camera.zoom, n.height + 6 / camera.zoom, 8)

@@ -80,16 +80,103 @@ body,
 .card {
   position: absolute;
   pointer-events: auto;
-  background: #fffdf5;
-  border: 1px solid #e9ecef;
+  background: #fff;
+  border: 1px solid transparent;
   border-radius: 8px;
-  padding: 8px 10px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  padding: 10px 12px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.1);
   overflow: hidden;
 }
 
-.card.selected {
-  box-shadow: 0 0 0 2px rgba(77, 171, 247, 0.4);
+.card:hover {
+  border-color: #e9ecef;
+}
+
+.card.selected,
+.card.selected:hover {
+  border-color: transparent;
+  box-shadow: 0 0 0 2px #4dabf7, 0 4px 12px rgba(16, 24, 40, 0.12);
+}
+
+.card[data-color='1'] {
+  background: #ffe3e3;
+}
+
+.card[data-color='2'] {
+  background: #ffe8cc;
+}
+
+.card[data-color='3'] {
+  background: #fff3bf;
+}
+
+.card[data-color='4'] {
+  background: #d3f9d8;
+}
+
+.card[data-color='5'] {
+  background: #c5f6fa;
+}
+
+.card[data-color='6'] {
+  background: #e5dbff;
+}
+
+.card.image {
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.card.image:hover {
+  border-color: transparent;
+  box-shadow: 0 2px 10px rgba(16, 24, 40, 0.16);
+}
+
+.card.image.selected,
+.card.image.selected:hover {
+  box-shadow: 0 0 0 2px #4dabf7;
+}
+
+.card.image img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  user-select: none;
+}
+
+.card.image.has-text {
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.1);
+}
+
+.card.image.has-text:hover {
+  box-shadow: 0 2px 10px rgba(16, 24, 40, 0.16);
+}
+
+.card.image.has-text img {
+  border-radius: 8px 8px 0 0;
+}
+
+.card.image.has-text.selected,
+.card.image.has-text.selected:hover {
+  box-shadow: 0 0 0 2px #4dabf7, 0 4px 12px rgba(16, 24, 40, 0.12);
+}
+
+.image-caption {
+  padding: 8px 10px;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  color: #212529;
+}
+
+.image-caption.editing:empty::before {
+  content: '添加说明…';
+  color: #adb5bd;
 }
 
 .card-text {
@@ -102,4 +189,131 @@ body,
 
 .card-text:empty::before {
   content: '';
+}
+
+.selection-bar {
+  position: absolute;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 6px;
+  background: #fff;
+  border: 1px solid #e9ecef;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(16, 24, 40, 0.14);
+  pointer-events: auto;
+  z-index: 5;
+  white-space: nowrap;
+}
+
+.sel-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  color: #495057;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sel-btn:hover {
+  background: #f1f3f5;
+}
+
+.sel-btn.danger:hover {
+  background: #ffe3e3;
+  color: #e03131;
+}
+
+.sel-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.sel-dot {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  padding: 0;
+}
+
+.sel-dot:hover {
+  transform: scale(1.15);
+}
+
+.sel-dot.clear {
+  background: #fff;
+}
+
+.sel-dot.clear::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: 50%;
+  height: 1.5px;
+  background: #adb5bd;
+  transform: rotate(-45deg);
+}
+
+.sel-sep {
+  width: 1px;
+  height: 18px;
+  background: #e9ecef;
+  margin: 0 4px;
+}
+
+.toolbar-image {
+  position: relative;
+  display: flex;
+}
+
+.image-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #e9ecef;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(16, 24, 40, 0.14);
+  z-index: 20;
+}
+
+.image-pop input[type='text'] {
+  width: 240px;
+  padding: 6px 8px;
+  font-size: 13px;
+  border: 1px solid #dee2e6;
+  border-radius: 6px;
+  outline: none;
+}
+
+.image-pop input[type='text']:focus {
+  border-color: #4dabf7;
+}
+
+.image-pop button {
+  border: 1px solid #dee2e6;
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  color: #495057;
+}
+
+.image-pop button:hover {
+  background: #f1f3f5;
 }

@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { cameraStore } from '../store/camera'
 import { documentStore } from '../store/document'
-import { renderInteractiveScene, renderStaticScene } from '../render/renderer'
-import { tools, ToolState, type PointerInfo, type ToolId, type ToolEnv } from '../tools/tools'
+import { hitTest, renderInteractiveScene, renderStaticScene } from '../render/renderer'
+import { createImageCard, duplicateNodes, tools, ToolState, viewportCenterWorld, type PointerInfo, type ToolId, type ToolEnv } from '../tools/tools'
 import { saveLocal } from '../persistence'
 import { CardLayer } from './CardLayer'
+
+const IMAGE_URL_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|avif|svg|bmp)(\?\S*)?$/i
+
+function isTypingTarget(e: Event): boolean {
+  const t = e.target as HTMLElement | null
+  return !!t && (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')
+}
 
 export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
   const doc = useSyncExternalStore(documentStore.subscribe, documentStore.getSnapshot)
@@ -13,6 +20,10 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
   const interactiveRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const toolStateRef = useRef(new ToolState())
+  const toolRef = useRef(props.tool)
+  const spaceRestoreRef = useRef<ToolId | null>(null)
+  const lastWorldRef = useRef<{ x: number; y: number } | null>(null)
+  toolRef.current = props.tool
 
   const [selection, setSelection] = useState<Set<string>>(new Set())
   const [dragPreview, setDragPreview] = useState<{ fromId: string; to: { x: number; y: number } } | null>(null)
@@ -24,12 +35,15 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
 
   useEffect(() => {
     let saveTimer = 0
-    const unsub = documentStore.subscribe(() => {
+    const scheduleSave = () => {
       window.clearTimeout(saveTimer)
       saveTimer = window.setTimeout(() => void saveLocal(), 300)
-    })
+    }
+    const unsubDoc = documentStore.subscribe(scheduleSave)
+    const unsubCam = cameraStore.subscribe(scheduleSave)
     return () => {
-      unsub()
+      unsubDoc()
+      unsubCam()
       window.clearTimeout(saveTimer)
     }
   }, [])
@@ -105,6 +119,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
   }
   const onPointerMove = (e: React.PointerEvent) => {
     const info = toPointerInfo(e)
+    lastWorldRef.current = info.world
     if (state.dragging?.type === 'pan') {
       tools.hand.onPointerMove?.(info, env, state)
     } else {
@@ -125,7 +140,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
     if (props.tool === 'select') {
       const info = toPointerInfo(e)
       tools.select.onDoubleClick?.(info, env)
-      if (!documentStore.getSnapshot().nodes?.some((n) => n.type === 'text' && n.x < info.world.x && n.x + n.width > info.world.x && n.y < info.world.y && n.y + n.height > info.world.y)) {
+      if (!hitTest(documentStore.getSnapshot(), info.world.x, info.world.y)) {
         tools.card.onPointerDown?.(info, env, state)
       }
     }
@@ -133,37 +148,138 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
   const onWheel = (e: React.WheelEvent) => {
     const rect = containerRef.current!.getBoundingClientRect()
     const screen = { x: e.clientX - rect.left, y: e.clientY - rect.top }
-    const cam = cameraStore.getSnapshot()
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
-    const zoom = Math.min(4, Math.max(0.1, cam.zoom * factor))
-    const world = cameraStore.screenToWorld(screen.x, screen.y)
-    cameraStore.set({
-      zoom,
-      x: screen.x - world.x * zoom,
-      y: screen.y - world.y * zoom,
-    })
+    const unit = e.deltaMode === 1 ? 16 : 1
+    if (e.ctrlKey || e.metaKey) {
+      const cam = cameraStore.getSnapshot()
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
+      const zoom = Math.min(4, Math.max(0.1, cam.zoom * factor))
+      const world = cameraStore.screenToWorld(screen.x, screen.y)
+      cameraStore.set({
+        zoom,
+        x: screen.x - world.x * zoom,
+        y: screen.y - world.y * zoom,
+      })
+    } else {
+      let dx = e.deltaX * unit
+      let dy = e.deltaY * unit
+      if (e.shiftKey && Math.abs(dx) < Math.abs(dy)) {
+        dx = dy
+        dy = 0
+      }
+      const cam = cameraStore.getSnapshot()
+      cameraStore.set({ x: cam.x - dx, y: cam.y - dy })
+    }
   }
 
   const onKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (editingId) return
+      if (e.code === 'Space') {
+        if (!isTypingTarget(e) && !e.repeat) {
+          e.preventDefault()
+          if (spaceRestoreRef.current === null) {
+            spaceRestoreRef.current = toolRef.current
+            if (toolRef.current !== 'hand') props.setTool('hand')
+          }
+        }
+        return
+      }
+      if (isTypingTarget(e)) return
+      if (e.key === 'Escape') {
+        setEditingId(null)
+        setSelection(new Set())
+        return
+      }
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && (e.key === 'd' || e.key === 'D')) {
+        e.preventDefault()
+        if (selection.size > 0) setSelection(duplicateNodes(selection))
+        return
+      }
+      if (mod && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault()
+        setSelection(new Set((documentStore.getSnapshot().nodes ?? []).map((n) => n.id)))
+        return
+      }
+      if (mod) return
       const map: Record<string, ToolId> = { v: 'select', h: 'hand', c: 'card', l: 'connect', b: 'box', d: 'draw' }
       const t = map[e.key.toLowerCase()]
-      if (t) props.setTool(t)
+      if (t) {
+        props.setTool(t)
+        return
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         for (const id of selection) {
           if (documentStore.getNode(id)) documentStore.deleteNode(id)
         }
         setSelection(new Set())
+        return
+      }
+      if (e.key.startsWith('Arrow') && selection.size > 0) {
+        e.preventDefault()
+        const step = e.shiftKey ? 10 : 1
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
+        for (const id of selection) {
+          const n = documentStore.getNode(id)
+          if (n) documentStore.updateNode(id, { x: n.x + dx, y: n.y + dy })
+        }
       }
     },
-    [editingId, selection, props],
+    [selection, props],
   )
 
   useEffect(() => {
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && spaceRestoreRef.current !== null) {
+        const restore = spaceRestoreRef.current
+        spaceRestoreRef.current = null
+        props.setTool(restore)
+      }
+    }
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onKeyDown])
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [onKeyDown, props])
+
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (isTypingTarget(e)) return
+      const items = e.clipboardData?.items
+      if (!items) return
+      const files: File[] = []
+      for (const item of Array.from(items)) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const f = item.getAsFile()
+          if (f) files.push(f)
+        }
+      }
+      const origin = lastWorldRef.current ?? viewportCenterWorld()
+      if (files.length > 0) {
+        e.preventDefault()
+        files.forEach((f, i) => {
+          const reader = new FileReader()
+          reader.onload = () => {
+            if (typeof reader.result === 'string') {
+              const offset = (i - (files.length - 1) / 2) * 24
+              createImageCard({ x: origin.x + offset, y: origin.y + offset }, reader.result)
+            }
+          }
+          reader.readAsDataURL(f)
+        })
+        return
+      }
+      const text = e.clipboardData?.getData('text/plain')?.trim() ?? ''
+      if (IMAGE_URL_RE.test(text)) {
+        e.preventDefault()
+        createImageCard(origin, text)
+      }
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [])
 
   return (
     <div
@@ -178,7 +294,14 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void }) {
     >
       <canvas ref={staticRef} className="canvas static" />
       <canvas ref={interactiveRef} className="canvas interactive" />
-      <CardLayer doc={doc} camera={camera} selection={selection} editingId={editingId} setEditingId={setEditingId} />
+      <CardLayer
+        doc={doc}
+        camera={camera}
+        selection={selection}
+        setSelection={setSelection}
+        editingId={editingId}
+        setEditingId={setEditingId}
+      />
     </div>
   )
 }

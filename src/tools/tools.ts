@@ -1,7 +1,7 @@
 import { cameraStore } from '../store/camera'
 import { documentStore, uid } from '../store/document'
 import { hitTest } from '../render/renderer'
-import type { CanvasNode, DrawNode, GroupNode, TextNode } from '../types'
+import type { CanvasNode, DrawNode, GroupNode, ImageNode, TextNode } from '../types'
 
 export type ToolId = 'select' | 'card' | 'connect' | 'box' | 'draw' | 'hand'
 
@@ -56,6 +56,46 @@ export function createTextCard(world: { x: number; y: number }): TextNode {
     width: 200,
     height: 60,
     text: '',
+  }
+  documentStore.addNode(node)
+  return node
+}
+
+export function viewportCenterWorld(): { x: number; y: number } {
+  const board = document.querySelector('.board') as HTMLElement | null
+  const w = board?.clientWidth ?? window.innerWidth
+  const h = board?.clientHeight ?? window.innerHeight
+  return cameraStore.screenToWorld(w / 2, h / 2)
+}
+
+export function duplicateNodes(ids: Set<string>): Set<string> {
+  const now = documentStore.getSnapshot()
+  const idMap = new Map<string, string>()
+  const copies: CanvasNode[] = []
+  for (const n of now.nodes ?? []) {
+    if (!ids.has(n.id)) continue
+    const copy = { ...n, id: uid(), x: n.x + 16, y: n.y + 16 } as CanvasNode
+    idMap.set(n.id, copy.id)
+    copies.push(copy)
+  }
+  for (const c of copies) documentStore.addNode(c)
+  for (const e of now.edges ?? []) {
+    const from = idMap.get(e.fromNode)
+    const to = idMap.get(e.toNode)
+    if (from && to) documentStore.addEdge({ ...e, id: uid(), fromNode: from, toNode: to })
+  }
+  return new Set(idMap.values())
+}
+
+export function createImageCard(world: { x: number; y: number }, url: string): ImageNode {
+  const node: ImageNode = {
+    id: uid(),
+    type: 'image',
+    x: Math.round(world.x - 140),
+    y: Math.round(world.y - 100),
+    width: 280,
+    height: 180,
+    url,
   }
   documentStore.addNode(node)
   return node
@@ -159,7 +199,7 @@ export const tools: Record<ToolId, Tool> = {
     },
     onDoubleClick(info, env) {
       const hit = topHitAt(info.world)
-      if (hit && hit.type === 'text') env.setEditingId(hit.id)
+      if (hit && (hit.type === 'text' || hit.type === 'image')) env.setEditingId(hit.id)
     },
   },
 

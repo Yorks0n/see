@@ -30,6 +30,12 @@ export interface LinkNode extends BaseNode {
   url: string
 }
 
+export interface ImageNode extends BaseNode {
+  type: 'image'
+  url: string
+  text?: string
+}
+
 export interface GroupNode extends BaseNode {
   type: 'group'
   label?: string
@@ -48,7 +54,7 @@ export interface DrawNode extends BaseNode {
   strokeWidth?: number
 }
 
-export type CanvasNode = TextNode | FileNode | LinkNode | GroupNode | DrawNode
+export type CanvasNode = TextNode | FileNode | LinkNode | ImageNode | GroupNode | DrawNode
 
 export interface CanvasEdge {
   id: string
