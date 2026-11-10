@@ -1,3 +1,4 @@
+import { IDBFactory } from 'fake-indexeddb'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { DocumentStore, documentStore, restoreCanvas } from '../src/store/document'
@@ -9,7 +10,7 @@ import { arrangeNodes, createImageCard, createList, createTextCard, duplicateNod
 import { arrangement, ARRANGE_GAP } from '../src/tools/layout'
 import { selectionSVG } from '../src/tools/export'
 import { SHORTCUTS } from '../src/shortcuts'
-import { deleteLocalFile, importCanvasFile, loadLocal, saveCanvas, saveLocal, saveRecovery, setActiveFile } from '../src/persistence'
+import { deleteLocalFile, importCanvasFile, initializeLocal, loadLocal, saveCanvas, saveLocal, saveRecovery, setActiveFile } from '../src/persistence'
 import { LIBRARY_KEY, LibraryStore } from '../src/store/library'
 import { cropImage, uncroppedBounds, type CropHandle } from '../src/tools/imageCrop'
 import { CLIPBOARD_MIME, copySelection, pasteSelection, readClipboard, writeClipboard } from '../src/tools/clipboard'
@@ -695,19 +696,24 @@ test('import rejects malformed documents before replacing the current canvas', a
 })
 
 test('synchronous recovery preserves the newest snapshot, including an empty canvas', async () => {
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() })
   const storage = new Map<string, string>()
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    get length() { return storage.size },
+    key: (index: number) => [...storage.keys()][index] ?? null,
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => storage.set(key, value),
     removeItem: (key: string) => storage.delete(key),
   } })
   try {
+    setActiveFile('recovery-test')
     documentStore.load({ nodes: [card('a')], meta: { name: 'Before' } })
-    await saveLocal() // Node has no IndexedDB; use the same recovery fallback.
+    await saveLocal()
     assert.equal((await loadLocal())!.nodes!.length, 1)
     documentStore.load({ nodes: [], edges: [], meta: { name: 'Empty' } })
     saveRecovery()
+    await initializeLocal()
     const restored = await loadLocal()
     assert.deepEqual(restored!.nodes, [])
     assert.equal(restored!.meta!.name, 'Empty')
@@ -1147,8 +1153,11 @@ test('shortcut registry has unique entries for list, SVG copy and file and view 
 })
 
 test('pending saves retain the source file and snapshot when another file becomes active', async () => {
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() })
   const storage = new Map<string, string>(), previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    get length() { return storage.size },
+    key: (index: number) => [...storage.keys()][index] ?? null,
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => storage.set(key, value),
     removeItem: (key: string) => storage.delete(key),
@@ -1171,15 +1180,19 @@ test('pending saves retain the source file and snapshot when another file become
 })
 
 test('file library migrates content, manages independent boards, and flattens legacy projects without losing files', async () => {
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() })
   const storage = new Map<string, string>(), previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
   const subscribe = documentStore.subscribe, subscriptions: (() => void)[] = []
   documentStore.subscribe = (listener) => { const unsubscribe = subscribe(listener); subscriptions.push(unsubscribe); return unsubscribe }
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    get length() { return storage.size },
+    key: (index: number) => [...storage.keys()][index] ?? null,
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => storage.set(key, value),
     removeItem: (key: string) => storage.delete(key),
   } })
   try {
+    setActiveFile('legacy-library-test')
     documentStore.load({ nodes: [card('legacy')], meta: { name: '原有白板' } })
     await saveLocal()
     const library = new LibraryStore()
@@ -1253,7 +1266,8 @@ test('file library migrates content, manages independent boards, and flattens le
     }))
     const migrated = new LibraryStore()
     await migrated.initialize()
-    assert.deepEqual(migrated.getSnapshot().files.map((file) => file.id), ['legacy-two', 'legacy-one'])
+    assert.deepEqual(migrated.getSnapshot().files.slice(0, 2).map((file) => file.id), ['legacy-two', 'legacy-one'])
+    assert.ok(migrated.getSnapshot().files.some((file) => file.id === fresh.id))
     assert.equal(JSON.parse(storage.get(LIBRARY_KEY)!).projects, undefined)
     assert.ok(migrated.getSnapshot().files.every((file) => !('projectId' in file)))
     await migrated.switchFile('legacy-two')

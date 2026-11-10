@@ -4,7 +4,7 @@ import { cameraStore, clampZoom } from '../store/camera'
 import { documentStore } from '../store/document'
 import { hitTest, renderInteractiveScene, renderStaticScene } from '../render/renderer'
 import { createImageCard, createTextCard, deleteNodes, duplicateNodes, expandSelection, finishConnection, groupNodes, ungroupNodes, moveConnection, startConnection, tools, ToolState, updateMembership, viewportCenterWorld, type DrawStyle, type PointerInfo, type ToolId, type ToolEnv } from '../tools/tools'
-import { saveLocal, saveRecovery } from '../persistence'
+import { markDirty, persistenceStore, saveLocal, saveRecovery } from '../persistence'
 import type { DrawPoint, ImageNode } from '../types'
 import { CardLayer, StrokeWidths } from './CardLayer'
 import { ConnectionLayer, type ConnectionPreview } from './ConnectionLayer'
@@ -66,13 +66,28 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   useEffect(() => { if (props.newNodeId) { setSelection(new Set([props.newNodeId])); setEdgeId(null) } }, [props.newNodeId])
   useEffect(() => {
     let saveTimer = 0
-    const scheduleSave = () => { clearTimeout(saveTimer); saveTimer = window.setTimeout(() => void saveLocal(), 300) }
+    const save = () => {
+      saveTimer = 0
+      if (persistenceStore.getSnapshot().state !== 'conflict') void saveLocal().catch(() => {})
+    }
+    const scheduleSave = () => {
+      markDirty()
+      // Do not postpone indefinitely while typing or dragging.
+      if (!saveTimer) saveTimer = window.setTimeout(save, 250)
+    }
     const unsubDoc = documentStore.subscribe(scheduleSave), unsubCam = cameraStore.subscribe(scheduleSave)
-    const flush = () => { saveRecovery(); void saveLocal() }
+    const flush = () => { clearTimeout(saveTimer); saveRecovery(); save() }
     const onVisibility = () => { if (document.visibilityState === 'hidden') flush() }
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (persistenceStore.getSnapshot().state === 'saved') return
+      flush()
+      event.preventDefault()
+      event.returnValue = ''
+    }
     window.addEventListener('pagehide', flush)
+    window.addEventListener('beforeunload', beforeUnload)
     document.addEventListener('visibilitychange', onVisibility)
-    return () => { unsubDoc(); unsubCam(); clearTimeout(saveTimer); window.removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', onVisibility) }
+    return () => { unsubDoc(); unsubCam(); clearTimeout(saveTimer); window.removeEventListener('pagehide', flush); window.removeEventListener('beforeunload', beforeUnload); document.removeEventListener('visibilitychange', onVisibility) }
   }, [])
   useEffect(() => {
     const container = containerRef.current!, staticCanvas = staticRef.current!, interactiveCanvas = interactiveRef.current!

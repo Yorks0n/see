@@ -1,130 +1,100 @@
 import { documentStore } from './store/document'
 import { cameraStore } from './store/camera'
+import { LocalRepository, portableCanvas, StorageConflictError } from './storage/local'
 import type { CanvasFile } from './types'
 
-const DB_NAME = 'whiteboard-db'
-const STORE = 'kv'
-const DOC_KEY = 'current-canvas'
-const RECOVERY_KEY = 'see-recovery-canvas'
-let activeFileKey = DOC_KEY
-const deletedFiles = new Set<string>()
-export function setActiveFile(id: string) { activeFileKey = `canvas:${id}` }
-const recoveryKey = (key: string) => key === DOC_KEY ? RECOVERY_KEY : `${RECOVERY_KEY}:${key}`
-interface SavedCanvas { savedAt: number; doc: CanvasFile }
-let lastRevision = 0
-const nextRevision = () => (lastRevision = Math.max(Date.now(), lastRevision + 1))
-
-function readRecovery(key = activeFileKey): SavedCanvas | null {
-  try {
-    const saved = JSON.parse(localStorage.getItem(recoveryKey(key)) ?? 'null') as SavedCanvas | null
-    return saved && typeof saved.savedAt === 'number' && Array.isArray(saved.doc?.nodes) ? saved : null
-  } catch { return null }
+export const localRepository = new LocalRepository()
+let activeFileId = 'legacy-default'
+const savedDocuments = new Map<string, string>()
+const pendingSaves = new Map<string, Promise<void>>()
+type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict'
+let status: { state: SaveState; message: string } = { state: 'saved', message: '' }
+const listeners = new Set<() => void>()
+function publish(state: SaveState, message = '') {
+  status = { state, message }
+  listeners.forEach((listener) => listener())
+}
+export const persistenceStore = {
+  subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+  getSnapshot: () => status,
 }
 function currentCanvas(): CanvasFile {
   const doc = documentStore.toJSON()
   doc.meta = { ...doc.meta, camera: cameraStore.getSnapshot() }
   return doc
 }
-function writeRecovery(saved: SavedCanvas, key: string) {
-  if (deletedFiles.has(key)) return
-  try { localStorage.setItem(recoveryKey(key), JSON.stringify(saved)) } catch { /* IndexedDB remains the primary store for large canvases. */ }
+export function setActiveFile(id: string) { activeFileId = id; savedDocuments.clear(); publish('saved') }
+export function markLoaded() {
+  savedDocuments.set(activeFileId, JSON.stringify(currentCanvas()))
+  publish('saved')
+}
+export function markDirty() {
+  if (status.state !== 'error' && status.state !== 'conflict') publish('dirty')
+}
+export function reportSaveError(error: unknown) {
+  const message = error instanceof StorageConflictError ? error.message
+    : error instanceof DOMException && error.name === 'QuotaExceededError' ? '本地空间不足，未能保存。请下载白板备份后释放空间，再重试。'
+    : `本地保存失败，请重试或下载白板备份。${error instanceof Error ? ` ${error.message}` : ''}`
+  publish(error instanceof StorageConflictError ? 'conflict' : 'error', message)
 }
 export function saveRecovery() {
-  // pagehide cannot wait for IndexedDB to open. Keep a synchronous recovery copy.
-  writeRecovery({ savedAt: nextRevision(), doc: currentCanvas() }, activeFileKey)
+  if (savedDocuments.get(activeFileId) === JSON.stringify(currentCanvas())) return
+  try { localRepository.journal(activeFileId, currentCanvas()) }
+  catch (error) { reportSaveError(error) }
 }
-
-function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1)
-    req.onupgradeneeded = () => {
-      req.result.createObjectStore(STORE)
+export function saveLocal(): Promise<void> {
+  const id = activeFileId, existing = pendingSaves.get(id)
+  if (existing) return existing
+  const pending = flushLocal(id)
+  pendingSaves.set(id, pending)
+  pending.then(() => pendingSaves.delete(id), () => pendingSaves.delete(id))
+  return pending
+}
+async function flushLocal(id: string): Promise<void> {
+  // Include edits made while an earlier transaction was committing before switching files.
+  do {
+    const doc = currentCanvas(), serialized = JSON.stringify(doc)
+    if (savedDocuments.get(id) === serialized) {
+      if (id === activeFileId) publish('saved')
+      return
     }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-  })
-}
-
-async function saveSnapshot(key: string, doc: CanvasFile) {
-  if (deletedFiles.has(key)) return
-  const saved: SavedCanvas = { savedAt: nextRevision(), doc }
-  try {
-    const db = await openDB()
-    if (deletedFiles.has(key)) { db.close(); return }
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readwrite')
-      tx.objectStore(STORE).put(saved, key)
-      tx.oncomplete = () => resolve()
-      tx.onerror = () => reject(tx.error)
-    })
-    db.close()
-    const recovery = readRecovery(key)
-    if (recovery && recovery.savedAt <= saved.savedAt) {
-      try { localStorage.removeItem(recoveryKey(key)) } catch { /* Storage may be disabled. */ }
-    }
-  } catch {
-    writeRecovery(saved, key)
-  }
-}
-
-export function saveLocal() { return saveSnapshot(activeFileKey, currentCanvas()) }
-export function saveCanvas(id: string, doc: CanvasFile) { return saveSnapshot(`canvas:${id}`, doc) }
-
-export async function deleteLocalFile(id: string) {
-  const key = `canvas:${id}`
-  deletedFiles.add(key)
-  try {
-    const db = await openDB()
+    publish('saving')
     try {
-      await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(STORE, 'readwrite')
-        tx.objectStore(STORE).delete(key)
-        tx.oncomplete = () => resolve()
-        tx.onerror = () => reject(tx.error)
-      })
-    } finally { db.close() }
-  } catch (error) {
-    // Recovery is the only storage when IndexedDB is unavailable.
-    if (typeof indexedDB !== 'undefined') { deletedFiles.delete(key); throw error }
-  }
-  localStorage.removeItem(recoveryKey(key))
+      await localRepository.save(id, doc)
+      savedDocuments.set(id, serialized)
+      if (id === activeFileId) publish(serialized === JSON.stringify(currentCanvas()) ? 'saved' : 'dirty')
+    } catch (error) {
+      if (id === activeFileId) { saveRecovery(); reportSaveError(error) }
+      throw error
+    }
+  } while (id === activeFileId && savedDocuments.get(id) !== JSON.stringify(currentCanvas()))
 }
-
-export async function loadLocal(fileId?: string): Promise<CanvasFile | null> {
-  const key = fileId ? `canvas:${fileId}` : activeFileKey
-  const recovery = readRecovery(key)
-  if (recovery) lastRevision = Math.max(lastRevision, recovery.savedAt)
-  try {
-    const db = await openDB()
-    const stored = await new Promise<SavedCanvas | CanvasFile | undefined>((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readonly')
-      const req = tx.objectStore(STORE).get(key)
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
-    })
-    db.close()
-    const saved = stored && 'doc' in stored ? stored as SavedCanvas : null
-    if (saved) lastRevision = Math.max(lastRevision, saved.savedAt)
-    if (recovery && (!saved || recovery.savedAt >= saved.savedAt)) return recovery.doc
-    return saved ? saved.doc : (stored as CanvasFile | undefined) ?? null
-  } catch {
-    return recovery?.doc ?? null
-  }
+export function saveCanvas(id: string, doc: CanvasFile) { return localRepository.save(id, doc) }
+export function loadLocal(id = activeFileId) { return localRepository.load(id) }
+export function deleteLocalFile(id: string) { return localRepository.delete(id) }
+export async function initializeLocal() {
+  let storage: Storage | null = null
+  try { storage = localStorage; void storage.length } catch { storage = null }
+  await localRepository.recover(storage)
+}
+export async function requestPersistentStorage() {
+  try { await navigator.storage?.persist?.() } catch { /* Browser grants this on a best-effort basis. */ }
 }
 
 export function exportCanvasFile() {
   const doc = documentStore.toJSON()
-  downloadCanvasFile({ ...doc, meta: { ...doc.meta, camera: cameraStore.getSnapshot() } })
+  return downloadCanvasFile({ ...doc, meta: { ...doc.meta, camera: cameraStore.getSnapshot() } })
 }
-export function downloadCanvasFile(doc: CanvasFile) {
-  const file = { ...doc, meta: { ...doc.meta, app: 'whiteboard', appVersion: '0.1.0' } }
+export async function downloadCanvasFile(doc: CanvasFile) {
+  const portable = await portableCanvas(doc)
+  const file = { ...portable, meta: { ...portable.meta, app: 'whiteboard', appVersion: '0.1.0' } }
   const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
   a.download = `${doc.meta?.name ?? 'canvas'}.canvas`
   a.click()
-  URL.revokeObjectURL(url)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 export function importCanvasFile(file: File): Promise<CanvasFile> {

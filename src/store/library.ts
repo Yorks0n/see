@@ -1,4 +1,4 @@
-import { deleteLocalFile, downloadCanvasFile, loadLocal, saveCanvas, saveLocal, setActiveFile } from '../persistence'
+import { deleteLocalFile, downloadCanvasFile, initializeLocal, localRepository, loadLocal, markLoaded, saveCanvas, saveLocal, setActiveFile } from '../persistence'
 import type { CanvasFile } from '../types'
 import { cameraStore } from './camera'
 import { documentStore, uid } from './document'
@@ -20,10 +20,11 @@ export class LibraryStore {
   }
   private persist() {
     const { files, activeFileId } = this.state
-    localStorage.setItem(LIBRARY_KEY, JSON.stringify({ files, activeFileId }))
+    // Optional device preferences; the file directory is derived from IndexedDB.
+    try { localStorage.setItem(LIBRARY_KEY, JSON.stringify({ files, activeFileId })) } catch { /* No document data is stored here. */ }
   }
   initialize() {
-    if (!this.initialization) this.initialization = this.open()
+    if (!this.initialization) this.initialization = this.open().catch((error) => { this.initialization = null; throw error })
     return this.initialization
   }
   private async open() {
@@ -35,6 +36,18 @@ export class LibraryStore {
         library = { files: pinnedFirst(raw.files.map((file: BoardFile) => ({ id: file.id, name: file.name, ...(file.pinned ? { pinned: true } : {}) }))), activeFileId: raw.activeFileId }
       }
     } catch { /* Start with the existing single-file document. */ }
+    await initializeLocal()
+    const stored = await localRepository.list()
+    if (stored.length) {
+      const hints = library
+      const ids = hints?.files.map((file) => file.id) ?? []
+      const files = pinnedFirst(stored.map((file) => ({ ...file, pinned: hints?.files.find((hint) => hint.id === file.id)?.pinned }))
+        .sort((a, b) => {
+          const left = ids.indexOf(a.id), right = ids.indexOf(b.id)
+          return (left < 0 ? ids.length : left) - (right < 0 ? ids.length : right)
+        }))
+      library = { files, activeFileId: files.some((file) => file.id === hints?.activeFileId) ? hints!.activeFileId : files[0].id }
+    } else library = null
     if (library) {
       const file = library.files.find((file) => file.id === library!.activeFileId)!
       const doc = await loadLocal(file.id)
@@ -43,11 +56,11 @@ export class LibraryStore {
       this.applyDocument(doc)
       this.emit({ ...library, ready: true })
     } else {
-      const doc = await loadLocal()
-      const file = { id: uid(), name: doc?.meta?.name || '我的白板' }
+      const file = { id: uid(), name: '我的白板' }
+      const doc = { nodes: [], edges: [], meta: { name: file.name } }
+      await saveCanvas(file.id, doc)
       setActiveFile(file.id)
-      this.applyDocument(doc ?? { nodes: [], edges: [], meta: { name: file.name } })
-      await saveLocal()
+      this.applyDocument(doc)
       this.emit({ files: [file], activeFileId: file.id, ready: true })
     }
     this.persist()
@@ -62,6 +75,7 @@ export class LibraryStore {
   private applyDocument(doc: CanvasFile) {
     documentStore.load(doc)
     cameraStore.set(doc.meta?.camera ?? { x: 0, y: 0, zoom: 1 })
+    markLoaded()
   }
   async switchFile(id: string) {
     if (id === this.state.activeFileId || this.state.busy) return
@@ -130,13 +144,30 @@ export class LibraryStore {
   async downloadFile(id: string) {
     if (this.state.busy || !this.state.files.some((file) => file.id === id)) return
     this.emit({ busy: true })
-    try { downloadCanvasFile(await this.readFile(id)) }
+    try {
+      const doc = id === this.state.activeFileId
+        ? { ...documentStore.toJSON(), meta: { ...documentStore.getSnapshot().meta, camera: cameraStore.getSnapshot() } }
+        : await loadLocal(id)
+      if (!doc) throw new Error('无法读取白板')
+      await downloadCanvasFile(doc)
+    }
     finally { this.emit({ busy: false }) }
   }
   togglePin(id: string) {
     if (this.state.busy) return
     this.emit({ files: pinnedFirst(this.state.files.map((file) => file.id === id ? { ...file, pinned: !file.pinned } : file)) })
     this.persist()
+  }
+  async saveCopy() {
+    if (this.state.busy) return
+    this.emit({ busy: true })
+    try {
+      const sourceId = this.state.activeFileId
+      const doc = documentStore.toJSON()
+      doc.meta = { ...doc.meta, camera: cameraStore.getSnapshot() }
+      await this.addFile(`${doc.meta.name || '白板'} 副本`, doc)
+      if (sourceId) localRepository.clearJournal(sourceId)
+    } finally { this.emit({ busy: false }) }
   }
   async deleteFile(id: string) {
     if (this.state.busy || !this.state.files.some((file) => file.id === id)) return
@@ -152,6 +183,7 @@ export class LibraryStore {
         this.emit({ files, activeFileId: next.id })
         this.applyDocument(doc)
       } else {
+        await loadLocal(id)
         await deleteLocalFile(id)
         this.emit({ files })
       }

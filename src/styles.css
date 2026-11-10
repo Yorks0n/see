@@ -253,3 +253,9 @@ button { touch-action: manipulation; }
 @media (max-width: 640px) { .files-sidebar { left: 8px; top: 66px; bottom: 8px; width: 224px; } .toolbar.sidebar-open .primary-tools { margin-left: 236px; } .app:has(.toolbar.sidebar-open) .theme-controls { margin-left: 0; visibility: hidden; } .app:has(.toolbar.sidebar-open) .draw-settings { left: auto; right: 12px; top: 66px; } }
 @media (prefers-reduced-motion: reduce) { .files-sidebar { animation: none; } }
 @media (max-width: 640px) { .file-menu { width: 152px; } .file-menu .submenu { width: calc(100vw - 172px); } .file-menu > .menu-branch > .menu-item kbd { display: none; } }
+.save-status { color: #69a780; font-size: 8px; padding: 0 3px; flex-shrink: 0; }
+.save-status.dirty, .save-status.saving { color: #c28c36; }
+.save-status.error, .save-status.conflict { color: #bd514b; }
+.storage-notice { position: fixed; top: 72px; left: 50%; transform: translateX(-50%); width: min(440px, calc(100vw - 32px)); padding: 14px; z-index: 100; font-size: 13px; }
+.storage-notice > div { display: flex; gap: 8px; margin-top: 10px; }
+.storage-notice button { padding: 6px 10px; border: 1px solid #e3eaee; border-radius: 6px; background: white; cursor: pointer; }

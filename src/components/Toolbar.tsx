@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Cursor, Hand, ImageSquare, PencilSimple, Plus, UploadSimple, X, List, SidebarSimple, DotsThree, SquaresFour, Rectangle } from './icons'
-import { exportCanvasFile, importCanvasFile, saveLocal } from '../persistence'
+import { exportCanvasFile, importCanvasFile, requestPersistentStorage, saveLocal } from '../persistence'
 import { documentStore } from '../store/document'
 import { createImageCard, viewportCenterWorld, type ToolId } from '../tools/tools'
 import { runBoardCommand, shortcut, type BoardCommand } from '../shortcuts'
@@ -8,6 +8,7 @@ import { MenuItems, PopupMenu, type MenuItem } from './Menu'
 import { IconButton } from './IconButton'
 import { FilesSidebar } from './FilesSidebar'
 import { libraryStore } from '../store/library'
+import { SaveStatus } from './SaveStatus'
 
 const TOOLS = [
   { id: 'select' as const, label: '选择', icon: Cursor },
@@ -32,7 +33,7 @@ export function Toolbar(props: { tool: ToolId; setTool: (t: ToolId) => void; onS
     const keys = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement
       if (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || !(e.metaKey || e.ctrlKey)) return
-      if (e.key.toLowerCase() === 's') { e.preventDefault(); void saveLocal() }
+      if (e.key.toLowerCase() === 's') { e.preventDefault(); void requestPersistentStorage(); void saveLocal().catch(() => {}) }
       if (e.key.toLowerCase() === 'o') { e.preventDefault(); importRef.current?.click() }
       if (e.key.toLowerCase() === 'k' && e.shiftKey) { e.preventDefault(); fileRef.current?.click() }
     }
@@ -67,17 +68,18 @@ export function Toolbar(props: { tool: ToolId; setTool: (t: ToolId) => void; onS
     reader.readAsDataURL(file)
   }
   const command = (label: string, id: BoardCommand, disabled = false): MenuItem => ({ label, shortcut: shortcut(id), action: () => runBoardCommand(id), disabled })
+  const download = () => { void exportCanvasFile().catch((error: Error) => setError(error.message)) }
   const menus: Record<string, (MenuItem | null)[]> = {
     文件: [
       { label: '新建白板', action: () => { void libraryStore.createFile().catch((error: Error) => setError(error.message)) } },
       { label: '重命名', action: rename },
-      { label: '保存到本地', shortcut: shortcut('save'), action: () => { void saveLocal() } },
+      { label: '保存到本地', shortcut: shortcut('save'), action: () => { void requestPersistentStorage(); void saveLocal().catch(() => {}) } },
       { label: '打开 .canvas…', shortcut: shortcut('open'), action: () => importRef.current?.click() },
-      { label: '下载 .canvas', action: exportCanvasFile },
+      { label: '下载 .canvas', action: download },
     ],
     编辑: [command('撤销', 'undo', !documentStore.canUndo), command('重做', 'redo', !documentStore.canRedo), null, command('剪切', 'cut'), command('复制', 'copy'), command('粘贴', 'paste'), command('创建副本', 'duplicate'), null, command('全选', 'select-all'), command('组合', 'group'), command('取消组合 / 解散列表', 'ungroup'), command('删除', 'delete')],
     视图: [command('缩放至全部内容', 'fit'), command('缩放至 100%', 'reset-zoom'), command('显示 / 隐藏界面', 'toggle-ui')],
-    导出: [{ label: '下载 .canvas', action: exportCanvasFile }, command('导出为 SVG', 'export-svg'), command('导出为 PNG', 'export-png'), null, command('复制为 SVG', 'copy-svg'), command('复制为 PNG', 'copy-png')],
+    导出: [{ label: '下载 .canvas', action: download }, command('导出为 SVG', 'export-svg'), command('导出为 PNG', 'export-png'), null, command('复制为 SVG', 'copy-svg'), command('复制为 PNG', 'copy-png')],
   }
   return <aside className={`toolbar ${expanded ? 'sidebar-open' : ''}`} aria-label="白板功能栏">
     <div className="board-header floating-panel">
@@ -87,6 +89,7 @@ export function Toolbar(props: { tool: ToolId; setTool: (t: ToolId) => void; onS
         {renaming ? <input ref={nameRef} className="document-name-input" aria-label="白板名称" value={name} size={1} maxLength={120} onChange={(e) => setName(e.target.value)} onBlur={finishRename} onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') setRenaming(false) }} />
           : <button className="document-name" title="点击重命名" onClick={rename}>{doc.meta?.name || '未命名画布'}</button>}
       </span>
+      <SaveStatus />
       <IconButton icon={DotsThree} label="文件菜单" active={menuOpen} aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => { setImageOpen(false); setMenuOpen(!menuOpen) }} />
       {menuOpen && <PopupMenu label="文件菜单" className="file-menu" onClose={() => setMenuOpen(false)}>
         <MenuItems items={[...Object.entries(menus).map(([label, items]) => ({ label, items })), null, { label: '插入媒体文件…', shortcut: shortcut('media'), action: () => fileRef.current?.click() }, command('键盘快捷方式', 'shortcuts')]} onChoose={() => setMenuOpen(false)} />
@@ -112,7 +115,7 @@ export function Toolbar(props: { tool: ToolId; setTool: (t: ToolId) => void; onS
       if (file) void importCanvasFile(file).then((doc) => {
         const name = typeof doc.meta?.name === 'string' && doc.meta.name.trim() ? doc.meta.name : file.name.replace(/\.canvas$/i, '')
         return libraryStore.createFile(name, doc)
-      }).catch(() => setError('导入失败：请选择有效的 .canvas 文件'))
+      }).catch((error: Error) => setError(`导入失败：${error.message}`))
       e.target.value = ''
     }} />
     {error && !imageOpen && <div className="toast" role="alert">{error}<IconButton icon={X} label="关闭提示" onClick={() => setError('')} /></div>}
