@@ -8,6 +8,7 @@ import type { CanvasFile, CanvasNode, ImageNode } from '../types'
 import { IconButton } from './IconButton'
 import { StylePalette } from './StylePalette'
 import { ResizeHandles } from './ResizeHandles'
+import { TextEditor } from './TextEditor'
 
 export function CardLayer(props: {
   doc: CanvasFile; camera: Camera; selection: Set<string>; setSelection: (s: Set<string>) => void
@@ -111,14 +112,15 @@ function TextCard({ node, camera, selected, editing, onDone, onEdit }: { node: E
     const measure = () => {
       const el = cardRef.current?.querySelector('.card-text')
       const current = documentStore.getNode(node.id)
-      if (active && el && current && !editing && el.scrollHeight > current.height - 23) documentStore.updateTextLayout(node.id, Math.ceil(el.scrollHeight + 24))
+      if (active && el && current && el.scrollHeight > current.height - 23) documentStore.updateTextLayout(node.id, Math.ceil(el.scrollHeight + 24))
     }
     measure()
     void document.fonts.ready.then(measure)
     return () => { active = false }
   }, [node.text, node.width, editing])
+  const textStyle = { width: Math.max(1, node.width - 26), fontSize: 14, transform: `scale(${camera.zoom})`, transformOrigin: 'top left' }
   return <div ref={cardRef} className={`card text-card ${selected ? 'selected' : ''}`} data-color={node.color} style={{ padding: `${10 * camera.zoom}px ${12 * camera.zoom}px`, ...(node.color?.startsWith('#') ? { background: `color-mix(in srgb, ${node.color} 18%, white)` } : {}) }} onDoubleClick={(e) => { e.stopPropagation(); onEdit() }}>
-    <EditableText text={node.text} editing={editing} className="card-text" style={{ width: Math.max(1, node.width - 26), fontSize: 14, transform: `scale(${camera.zoom})`, transformOrigin: 'top left', maxHeight: editing ? node.height - 24 : undefined }} onDone={onDone} />
+    <TextEditor text={node.text} editing={editing} style={textStyle} onChange={(text) => documentStore.updateNode(node.id, { text })} onDone={onDone} />
   </div>
 }
 function ImageCard({ node, camera, selected, editing, draft, onInput, onDone, onCrop }: { node: ImageNode; camera: Camera; selected: boolean; editing: boolean; draft: string; onInput: (text: string) => void; onDone: (text: string) => void; onCrop: () => void }) {

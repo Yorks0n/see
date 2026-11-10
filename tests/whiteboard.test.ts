@@ -10,6 +10,12 @@ import { importCanvasFile, loadLocal, saveLocal, saveRecovery } from '../src/per
 import { cropImage, uncroppedBounds, type CropHandle } from '../src/tools/imageCrop'
 import { CLIPBOARD_MIME, copySelection, pasteSelection, readClipboard, writeClipboard } from '../src/tools/clipboard'
 import type { CanvasNode, GroupNode, ImageNode, TextNode } from '../src/types'
+import { EditorState, TextSelection } from 'prosemirror-state'
+import type { EditorView } from 'prosemirror-view'
+import { liftListItem, splitListItem } from 'prosemirror-schema-list'
+import { undoInputRule } from 'prosemirror-inputrules'
+import { undo, redo } from 'prosemirror-history'
+import { textDocument, textMarkdown, textPlugins, textSchema } from '../src/tools/textEditor'
 
 const card = (id: string, x = 20, y = 20): TextNode => ({ id, type: 'text', x, y, width: 100, height: 60, text: id })
 const frame = (ids = ['a', 'b']): GroupNode => ({ id: 'group', type: 'group', x: 0, y: 0, width: 350, height: 250, label: 'Ideas', memberIds: ids })
@@ -18,6 +24,150 @@ function environment(selection = new Set<string>()): ToolEnv {
   const env: ToolEnv = { selection, setSelection: (next) => { env.selection = next }, setDragPreview: () => {}, setMarquee: () => {}, setPaintTrail: () => {}, setEditingId: () => {}, setTool: () => {}, drawStyle: { color: '5', strokeWidth: 4 } }
   return env
 }
+
+test('text blocks render three heading levels and preserve ordinary text and blank lines', () => {
+  const doc = textDocument('# 大标题\r\n## 二级标题\n### 三级标题\n正文\n\n#没有空格\n#### 四级原文')
+  assert.deepEqual([0, 1, 2].map((i) => [doc.child(i).type.name, doc.child(i).attrs.level]), [['heading', 1], ['heading', 2], ['heading', 3]])
+  assert.equal(doc.child(3).textContent, '正文')
+  assert.equal(doc.child(4).textContent, '')
+  assert.equal(doc.child(5).textContent, '#没有空格')
+  assert.equal(doc.child(6).textContent, '#### 四级原文')
+})
+
+test('consecutive dash items render as lists and stop at headings or ordinary text', () => {
+  const doc = textDocument('- 第一项\n- 第二项\n正文\n- 第三项\n## 标题\n-最后保留原文')
+  assert.equal(doc.child(0).type.name, 'bullet_list')
+  assert.equal(doc.child(0).childCount, 2)
+  assert.equal(doc.child(1).textContent, '正文')
+  assert.equal(doc.child(2).type.name, 'bullet_list')
+  assert.equal(doc.child(2).childCount, 1)
+  assert.equal(doc.child(3).type.name, 'heading')
+  assert.equal(doc.child(4).textContent, '-最后保留原文')
+})
+
+test('Markdown and bare links render safely inside headings, lists and ordinary text', () => {
+  const doc = textDocument('# [标题链接](https://example.com/title)\n- 访问 https://example.com/docs。\n[带括号](https://example.com/a_(b)) 与 https://example.com/wiki/Foo_(bar).\n[邮件](mailto:hello@example.com)')
+  const links: string[] = []
+  doc.descendants((node) => { if (node.marks.length) links.push(node.marks[0].attrs.href) })
+  assert.deepEqual(links, ['https://example.com/title', 'https://example.com/docs', 'https://example.com/a_(b)', 'https://example.com/wiki/Foo_(bar)', 'mailto:hello@example.com'])
+  assert.equal(doc.child(0).textContent, '标题链接')
+  assert.equal(doc.child(1).textContent, '访问 https://example.com/docs。')
+})
+
+test('text Markdown leaves HTML and executable link schemes as plain text', () => {
+  const source = '<img src=x onerror=alert(1)>\n[unsafe](javascript:alert(1))\n[data](data:text/html,test)'
+  const doc = textDocument(source)
+  doc.descendants((node) => { assert.equal(node.marks.length, 0) })
+  assert.equal(textMarkdown(doc), source)
+})
+
+function textInput(text = '') {
+  const doc = textDocument(text)
+  const view = {
+    state: EditorState.create({ doc, selection: TextSelection.atEnd(doc), plugins: textPlugins() }),
+    composing: false,
+    dispatch(tr: import('prosemirror-state').Transaction) { view.state = view.state.applyTransaction(tr).state },
+  }
+  return {
+    view,
+    type(text: string) {
+      for (const char of text) {
+        const { from, to } = view.state.selection
+        const handled = view.state.plugins.some((plugin) => plugin.props.handleTextInput?.call(plugin, view as unknown as EditorView, from, to, char, () => view.state.tr.insertText(char)))
+        if (!handled) view.dispatch(view.state.tr.insertText(char))
+      }
+    },
+  }
+}
+
+test('rich text preserves Markdown headings, lists, blank lines and link targets on round trip', () => {
+  const source = '# 标题\n## 二级\n### 三级\n正文\n\n- 列表\n- [链接](https://example.com/a_(b))\nhttps://example.org。'
+  assert.equal(textMarkdown(textDocument(source)), source)
+  assert.equal(textMarkdown(textDocument('# \n- ')), '# \n- ')
+})
+
+test('typing Markdown prefixes converts headings immediately without moving the text cursor', () => {
+  for (const level of [1, 2, 3]) {
+    const input = textInput()
+    input.type('#'.repeat(level) + ' ')
+    assert.equal(input.view.state.doc.firstChild!.type.name, 'heading')
+    assert.equal(input.view.state.doc.firstChild!.attrs.level, level)
+    assert.equal(input.view.state.selection.$from.parentOffset, 0)
+    input.type('实时标题')
+    assert.equal(input.view.state.selection.$from.parentOffset, 4)
+    assert.equal(textMarkdown(input.view.state.doc), '#'.repeat(level) + ' 实时标题')
+  }
+})
+
+test('list input converts immediately, Enter continues items, and an empty item exits the list', () => {
+  const input = textInput()
+  input.type('- ')
+  assert.equal(input.view.state.doc.firstChild!.type.name, 'bullet_list')
+  input.type('第一项')
+  assert.ok(splitListItem(textSchema.nodes.list_item)(input.view.state, input.view.dispatch))
+  input.type('第二项')
+  assert.equal(textMarkdown(input.view.state.doc), '- 第一项\n- 第二项')
+  assert.ok(splitListItem(textSchema.nodes.list_item)(input.view.state, input.view.dispatch))
+  assert.equal(splitListItem(textSchema.nodes.list_item)(input.view.state, input.view.dispatch), false)
+  assert.ok(liftListItem(textSchema.nodes.list_item)(input.view.state, input.view.dispatch))
+  assert.equal(input.view.state.selection.$from.parent.type.name, 'paragraph')
+  input.type('列表外正文')
+  assert.equal(textMarkdown(input.view.state.doc), '- 第一项\n- 第二项\n列表外正文')
+})
+
+test('Backspace can undo prefix conversion and editor history restores formatted content', () => {
+  const input = textInput()
+  input.type('## ')
+  assert.ok(undoInputRule(input.view.state, input.view.dispatch))
+  assert.equal(input.view.state.doc.firstChild!.type.name, 'paragraph')
+  assert.equal(input.view.state.doc.textContent, '## ')
+  const other = textInput('# 原标题')
+  other.type('增加')
+  assert.ok(undo(other.view.state, other.view.dispatch))
+  assert.equal(textMarkdown(other.view.state.doc), '# 原标题')
+  assert.ok(redo(other.view.state, other.view.dispatch))
+  assert.equal(textMarkdown(other.view.state.doc), '# 原标题增加')
+})
+
+test('Backspace at the start of an existing heading restores ordinary text', () => {
+  const input = textInput('## 标题')
+  input.view.dispatch(input.view.state.tr.setSelection(TextSelection.create(input.view.state.doc, 1)))
+  const event = { key: 'Backspace', keyCode: 8, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false } as KeyboardEvent
+  const handled = input.view.state.plugins.some((plugin) => plugin.props.handleKeyDown?.call(plugin, input.view as unknown as EditorView, event))
+  assert.equal(handled, true)
+  assert.equal(input.view.state.doc.firstChild!.type.name, 'paragraph')
+  assert.equal(textMarkdown(input.view.state.doc), '标题')
+})
+
+test('text selections preserve Markdown when copying partial lists and linked labels', () => {
+  const doc = textDocument('- 第一项\n- [文档](https://example.com)')
+  const positions: number[] = []
+  doc.descendants((node, pos) => { if (node.isText) positions.push(pos) })
+  const slice = doc.slice(positions[0] + 1, positions[1] + 2, true)
+  assert.equal(textMarkdown(textSchema.nodes.doc.create(null, slice.content)), '- 一项\n- [文档](https://example.com)')
+  const label = doc.child(0).child(1).child(0).content
+  assert.equal(textMarkdown(textSchema.nodes.doc.create(null, label)), '[文档](https://example.com)')
+})
+
+test('live links update their targets as text is typed and explicit links retain their label', () => {
+  const input = textInput()
+  input.type('https://example.com/path')
+  assert.equal(input.view.state.doc.firstChild!.firstChild!.marks[0].attrs.href, 'https://example.com/path')
+  assert.equal(textMarkdown(input.view.state.doc), 'https://example.com/path')
+  const labeled = textInput()
+  labeled.type('[文档](https://example.com/docs)')
+  assert.equal(labeled.view.state.doc.textContent, '文档')
+  assert.equal(labeled.view.state.doc.firstChild!.firstChild!.marks[0].attrs.href, 'https://example.com/docs')
+  assert.equal(textMarkdown(labeled.view.state.doc), '[文档](https://example.com/docs)')
+})
+
+test('composition input is not replaced by Markdown prefix rules mid-composition', () => {
+  const input = textInput()
+  input.view.composing = true
+  input.type('# 中文')
+  assert.equal(input.view.state.doc.firstChild!.type.name, 'paragraph')
+  assert.equal(input.view.state.doc.textContent, '# 中文')
+})
 
 test('restoration preserves crop, natural dimensions, group membership and stroke style', () => {
   const doc = restoreCanvas({ nodes: [

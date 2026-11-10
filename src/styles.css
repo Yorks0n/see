@@ -72,6 +72,14 @@ button { touch-action: manipulation; }
 .card-text { outline: none; line-height: 1.6; white-space: pre-wrap; word-break: break-word; min-height: 1.6em; }
 .card-text:empty::before, .image-caption:empty::before { content: attr(data-placeholder); color: #b2aabc; pointer-events: none; }
 .card-text.editing { cursor: text; user-select: text; max-height: 100%; overflow-y: auto; }
+.markdown-text h1, .markdown-text h2, .markdown-text h3 { margin: 0; font-size: 1em; font-weight: 700; line-height: inherit; }
+.markdown-text h1 { font-size: 1.25em; }
+.markdown-text ul { margin: .2em 0; padding-left: 1.5em; list-style: disc; }
+.markdown-text .markdown-line { min-height: 1.6em; }
+.markdown-text a { color: #2563eb; text-decoration: underline; cursor: pointer; }
+.text-editor { position: relative; outline: none; overflow-wrap: break-word; }
+.text-editor li > .markdown-line:only-child { min-height: 0; }
+.text-editor .ProseMirror-selectednode { outline: none; }
 .image-card { overflow: hidden; border: none; background: #edf3f6; }
 .image-viewport { position: absolute; inset: 0; overflow: hidden; border-radius: inherit; }
 .image-viewport img { display: block; position: absolute; max-width: none; user-select: none; pointer-events: none; object-fit: fill; }
