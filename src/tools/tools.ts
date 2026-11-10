@@ -1,40 +1,44 @@
 import { cameraStore } from '../store/camera'
 import { documentStore, uid } from '../store/document'
+import { preferencesStore } from '../store/preferences'
 import { hitTest } from '../render/renderer'
-import type { CanvasNode, DrawNode, GroupNode, ImageNode, TextNode } from '../types'
+import type { CanvasColor, CanvasNode, DrawNode, DrawPoint, GroupNode, ImageNode, TextNode } from '../types'
 
-export type ToolId = 'select' | 'card' | 'connect' | 'box' | 'draw' | 'hand'
-
+export type ToolId = 'select' | 'box' | 'draw' | 'hand'
+export interface DrawStyle { color?: CanvasColor; strokeWidth: number }
 export interface ToolEnv {
   selection: Set<string>
   setSelection: (s: Set<string>) => void
-  setDragPreview: (p: { fromId: string; to: { x: number; y: number } } | null) => void
+  setDragPreview: (p: { fromId: string; to: { x: number; y: number }; targetId?: string } | null) => void
   setMarquee: (m: { x: number; y: number; width: number; height: number } | null) => void
+  setPaintTrail: (points: DrawPoint[] | null) => void
   setEditingId: (id: string | null) => void
+  setTool: (t: ToolId) => void
+  drawStyle: DrawStyle
 }
-
 export interface PointerInfo {
   screen: { x: number; y: number }
   world: { x: number; y: number }
   shiftKey: boolean
+  nodeId?: string
 }
-
 interface DragState {
   type: 'pan' | 'move' | 'marquee' | 'connect' | 'box' | 'draw'
   startWorld: { x: number; y: number }
   startScreen: { x: number; y: number }
   originCamera?: { x: number; y: number }
   origins?: Map<string, { x: number; y: number }>
+  initialSelection?: Set<string>
+  currentWorld?: DrawPoint
+  selectionMode?: 'paint' | 'box'
+  paintedSelection?: Set<string>
+  paintTrail?: DrawPoint[]
   fromId?: string
   rect?: { x: number; y: number; width: number; height: number }
   points?: { x: number; y: number }[]
   moved?: boolean
 }
-
-export class ToolState {
-  dragging: DragState | null = null
-}
-
+export class ToolState { dragging: DragState | null = null }
 export interface Tool {
   id: ToolId
   onPointerDown?(info: PointerInfo, env: ToolEnv, state: ToolState): void
@@ -43,62 +47,193 @@ export interface Tool {
   onDoubleClick?(info: PointerInfo, env: ToolEnv): void
 }
 
-function topHitAt(world: { x: number; y: number }): CanvasNode | null {
-  return hitTest(documentStore.getSnapshot(), world.x, world.y)
-}
+const topHitAt = (world: { x: number; y: number }) => hitTest(documentStore.getSnapshot(), world.x, world.y, 7 / cameraStore.getSnapshot().zoom)
+export const contains = (outer: Pick<CanvasNode, 'x' | 'y' | 'width' | 'height'>, inner: CanvasNode) => inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height
 
-export function createTextCard(world: { x: number; y: number }): TextNode {
-  const node: TextNode = {
-    id: uid(),
-    type: 'text',
-    x: Math.round(world.x - 100),
-    y: Math.round(world.y - 30),
-    width: 200,
-    height: 60,
-    text: '',
+export function expandSelection(ids: Set<string>): Set<string> {
+  const result = new Set(ids)
+  const nodes = documentStore.getSnapshot().nodes ?? []
+  const visit = (id: string) => {
+    const group = documentStore.getNode(id)
+    if (group?.type !== 'group') return
+    for (const node of nodes) {
+      if (result.has(node.id)) continue
+      if (group.memberIds ? group.memberIds.includes(node.id) : contains(group, node)) {
+        result.add(node.id)
+        visit(node.id)
+      }
+    }
   }
-  documentStore.addNode(node)
+  ids.forEach(visit)
+  return result
+}
+export function deleteNodes(ids: Set<string>) {
+  documentStore.transact(() => ids.forEach((id) => documentStore.deleteNode(id)))
+}
+export function createTextCard(world: { x: number; y: number }): TextNode {
+  const node: TextNode = { id: uid(), type: 'text', x: Math.round(world.x - 100), y: Math.round(world.y - 30), width: 200, height: 64, text: '', color: preferencesStore.getSnapshot().textColor }
+  documentStore.transact(() => { documentStore.addNode(node); updateMembership([node.id]) })
   return node
 }
-
-export function viewportCenterWorld(): { x: number; y: number } {
+export function viewportCenterWorld() {
   const board = document.querySelector('.board') as HTMLElement | null
-  const w = board?.clientWidth ?? window.innerWidth
-  const h = board?.clientHeight ?? window.innerHeight
-  return cameraStore.screenToWorld(w / 2, h / 2)
+  return cameraStore.screenToWorld((board?.clientWidth ?? window.innerWidth) / 2, (board?.clientHeight ?? window.innerHeight) / 2)
 }
-
 export function duplicateNodes(ids: Set<string>): Set<string> {
   const now = documentStore.getSnapshot()
-  const idMap = new Map<string, string>()
-  const copies: CanvasNode[] = []
-  for (const n of now.nodes ?? []) {
-    if (!ids.has(n.id)) continue
-    const copy = { ...n, id: uid(), x: n.x + 16, y: n.y + 16 } as CanvasNode
-    idMap.set(n.id, copy.id)
-    copies.push(copy)
+  const all = expandSelection(ids)
+  const idMap = new Map([...all].map((id) => [id, uid()]))
+  documentStore.transact(() => {
+    for (const n of now.nodes ?? []) {
+      const id = idMap.get(n.id)
+      if (!id) continue
+      const copy = { ...n, id, x: n.x + 24, y: n.y + 24 }
+      if (copy.type === 'group') copy.memberIds = (copy.memberIds ?? []).map((member) => idMap.get(member)).filter((member): member is string => !!member)
+      documentStore.addNode(copy)
+    }
+    for (const e of now.edges ?? []) {
+      const from = idMap.get(e.fromNode), to = idMap.get(e.toNode)
+      if (from && to) documentStore.addEdge({ ...e, id: uid(), fromNode: from, toNode: to })
+    }
+    updateMembership(idMap.values())
+  })
+  return new Set([...ids].map((id) => idMap.get(id)!).filter(Boolean))
+}
+export function createImageCard(world: { x: number; y: number }, url: string): ImageNode {
+  const node: ImageNode = { id: uid(), type: 'image', x: Math.round(world.x - 140), y: Math.round(world.y - 100), width: 280, height: 180, url }
+  documentStore.transact(() => { documentStore.addNode(node); updateMembership([node.id]) })
+  return node
+}
+export function groupNodes(ids: Set<string>): GroupNode | null {
+  const nodes = (documentStore.getSnapshot().nodes ?? []).filter((n) => ids.has(n.id))
+  if (!nodes.length) return null
+  const x = Math.min(...nodes.map((n) => n.x)) - 28
+  const y = Math.min(...nodes.map((n) => n.y)) - 28
+  const group: GroupNode = { id: uid(), type: 'group', x, y, width: Math.max(...nodes.map((n) => n.x + n.width)) - x + 28, height: Math.max(...nodes.map((n) => n.y + n.height)) - y + 28, label: '分组', memberIds: nodes.map((n) => n.id) }
+  documentStore.transact(() => { documentStore.addNode(group); updateMembership([group.id]) })
+  return group
+}
+export function startConnection(fromId: string, info: PointerInfo, env: ToolEnv, state: ToolState) {
+  state.dragging = { type: 'connect', startWorld: info.world, startScreen: info.screen, fromId, moved: false }
+  env.setSelection(new Set([fromId]))
+  env.setDragPreview({ fromId, to: info.world })
+}
+export function moveConnection(info: PointerInfo, env: ToolEnv, state: ToolState) {
+  const d = state.dragging
+  if (d?.type !== 'connect' || !d.fromId) return
+  if (Math.hypot(info.screen.x - d.startScreen.x, info.screen.y - d.startScreen.y) > 5) d.moved = true
+  const target = topHitAt(info.world)
+  env.setDragPreview({ fromId: d.fromId, to: info.world, targetId: target?.id !== d.fromId && target?.type !== 'group' && target?.type !== 'draw' ? target?.id : undefined })
+}
+export function finishConnection(info: PointerInfo, env: ToolEnv, state: ToolState) {
+  const d = state.dragging
+  env.setDragPreview(null)
+  if (d?.type === 'connect' && d.fromId && d.moved) {
+    let target = topHitAt(info.world)
+    if (!target || target.type === 'group') {
+      target = createTextCard({ x: info.world.x + 100, y: info.world.y + 30 })
+      env.setSelection(new Set([target.id]))
+      env.setEditingId(target.id)
+    }
+    if (target.id !== d.fromId && target.type !== 'draw') {
+      const duplicate = documentStore.getSnapshot().edges?.some((e) => (e.fromNode === d.fromId && e.toNode === target!.id) || (e.toNode === d.fromId && e.fromNode === target!.id))
+      if (!duplicate) documentStore.addEdge({ id: uid(), fromNode: d.fromId, toNode: target.id, fromEnd: 'none', toEnd: 'none', color: preferencesStore.getSnapshot().connectionColor })
+    }
   }
-  for (const c of copies) documentStore.addNode(c)
-  for (const e of now.edges ?? []) {
-    const from = idMap.get(e.fromNode)
-    const to = idMap.get(e.toNode)
-    if (from && to) documentStore.addEdge({ ...e, id: uid(), fromNode: from, toNode: to })
-  }
-  return new Set(idMap.values())
+  state.dragging = null
 }
 
-export function createImageCard(world: { x: number; y: number }, url: string): ImageNode {
-  const node: ImageNode = {
-    id: uid(),
-    type: 'image',
-    x: Math.round(world.x - 140),
-    y: Math.round(world.y - 100),
-    width: 280,
-    height: 180,
-    url,
+export function splitImageCaption(id: string, text: string): TextNode | null {
+  const image = documentStore.getNode(id)
+  if (image?.type !== 'image' || !text.trim()) return null
+  let card: TextNode
+  documentStore.transact(() => {
+    card = createTextCard({ x: image.x + 100, y: image.y + image.height + 54 })
+    documentStore.updateNode(card.id, { text, width: Math.max(80, image.width) })
+    documentStore.updateNode(image.id, { text: undefined })
+    updateMembership([card.id])
+  })
+  return documentStore.getNode(card!.id) as TextNode
+}
+
+export function updateMembership(ids: Iterable<string>) {
+  const nodes = documentStore.getSnapshot().nodes ?? []
+  const groups = nodes.filter((n): n is GroupNode => n.type === 'group')
+  const patches = new Map<string, Partial<CanvasNode>>()
+  const memberships = new Map(groups.map((g) => [g.id, [...(g.memberIds ?? nodes.filter((n) => n.id !== g.id && contains(g, n)).map((n) => n.id))]]))
+  for (const id of ids) {
+    const n = documentStore.getNode(id)
+    if (!n) continue
+    const descendants = expandSelection(new Set([id]))
+    const parent = groups.filter((g) => !descendants.has(g.id) && contains(g, n)).sort((a, b) =>
+      a.width * a.height - b.width * b.height || Number(!!b.memberIds?.includes(id)) - Number(!!a.memberIds?.includes(id)))[0]
+    for (const g of groups) {
+      const members = memberships.get(g.id)!.filter((member) => member !== id)
+      if (parent?.id === g.id) members.push(id)
+      memberships.set(g.id, members)
+    }
   }
-  documentStore.addNode(node)
-  return node
+  for (const g of groups) {
+    const memberIds = memberships.get(g.id)!
+    if (JSON.stringify(memberIds) !== JSON.stringify(g.memberIds ?? [])) patches.set(g.id, { memberIds })
+  }
+  documentStore.updateNodes(patches)
+}
+
+function segmentHitsRect(from: DrawPoint, to: DrawPoint, rect: { x: number; y: number; width: number; height: number }, padding: number) {
+  let start = 0, end = 1
+  for (const axis of ['x', 'y'] as const) {
+    const min = rect[axis] - padding, max = rect[axis] + (axis === 'x' ? rect.width : rect.height) + padding
+    const delta = to[axis] - from[axis]
+    if (!delta) {
+      if (from[axis] < min || from[axis] > max) return false
+    } else {
+      const a = (min - from[axis]) / delta, b = (max - from[axis]) / delta
+      start = Math.max(start, Math.min(a, b)); end = Math.min(end, Math.max(a, b))
+      if (start > end) return false
+    }
+  }
+  return true
+}
+
+function updateSelectionDrag(info: PointerInfo, env: ToolEnv, state: ToolState) {
+  const d = state.dragging
+  if (d?.type !== 'marquee') return
+  const nodes = documentStore.getSnapshot().nodes ?? []
+  const previous = d.selectionMode === 'paint' ? d.currentWorld ?? d.startWorld : info.world
+  d.currentWorld = info.world
+  if (info.shiftKey) {
+    d.selectionMode = 'box'
+    d.rect = { x: Math.min(d.startWorld.x, info.world.x), y: Math.min(d.startWorld.y, info.world.y), width: Math.abs(info.world.x - d.startWorld.x), height: Math.abs(info.world.y - d.startWorld.y) }
+    const selected = new Set(d.initialSelection)
+    for (const n of nodes) if (contains(d.rect, n)) selected.add(n.id)
+    env.setSelection(selected)
+    env.setMarquee(d.rect); env.setPaintTrail(null)
+  } else {
+    const zoom = cameraStore.getSnapshot().zoom, radius = 10 / zoom
+    const steps = Math.max(1, Math.ceil(Math.hypot(info.world.x - previous.x, info.world.y - previous.y) * zoom / 5))
+    d.selectionMode = 'paint'
+    const selected = d.paintedSelection ??= new Set<string>()
+    for (const n of nodes) {
+      if (n.type === 'group' || selected.has(n.id) || !segmentHitsRect(previous, info.world, n, radius + (n.type === 'draw' ? (n.strokeWidth ?? 3) / 2 : 0))) continue
+      if (n.type !== 'draw') { selected.add(n.id); continue }
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps
+        if (hitTest({ nodes: [n] }, previous.x + (info.world.x - previous.x) * t, previous.y + (info.world.y - previous.y) * t, radius)) { selected.add(n.id); break }
+      }
+    }
+    const trail = d.paintTrail ??= []
+    if (previous === info.world) trail.length = 0
+    for (let i = Math.max(1, steps - 31); i <= steps; i++) {
+      const t = i / steps
+      const point = { x: previous.x + (info.world.x - previous.x) * t, y: previous.y + (info.world.y - previous.y) * t }
+      const last = trail[trail.length - 1]
+      if (!last || last.x !== point.x || last.y !== point.y) trail.push(point)
+    }
+    d.paintTrail = trail.slice(-32)
+    env.setSelection(new Set(selected))
+    env.setMarquee(null); env.setPaintTrail(d.paintTrail)
+  }
 }
 
 export const tools: Record<ToolId, Tool> = {
@@ -106,224 +241,104 @@ export const tools: Record<ToolId, Tool> = {
     id: 'hand',
     onPointerDown(info, _env, state) {
       const cam = cameraStore.getSnapshot()
-      state.dragging = {
-        type: 'pan',
-        startWorld: info.world,
-        startScreen: info.screen,
-        originCamera: { x: cam.x, y: cam.y },
-      }
+      state.dragging = { type: 'pan', startWorld: info.world, startScreen: info.screen, originCamera: { x: cam.x, y: cam.y } }
     },
     onPointerMove(info, _env, state) {
       const d = state.dragging
-      if (d?.type !== 'pan' || !d.originCamera) return
-      cameraStore.set({
-        x: d.originCamera.x + (info.screen.x - d.startScreen.x),
-        y: d.originCamera.y + (info.screen.y - d.startScreen.y),
-      })
+      if (d?.type === 'pan' && d.originCamera) cameraStore.set({ x: d.originCamera.x + info.screen.x - d.startScreen.x, y: d.originCamera.y + info.screen.y - d.startScreen.y })
     },
-    onPointerUp(_info, _env, state) {
-      state.dragging = null
-    },
+    onPointerUp(_info, _env, state) { state.dragging = null },
   },
-
   select: {
     id: 'select',
     onPointerDown(info, env, state) {
-      const hit = topHitAt(info.world)
+      const hit = (info.nodeId ? documentStore.getNode(info.nodeId) : null) ?? topHitAt(info.world)
       if (hit) {
-        const sel = env.selection.has(hit.id) ? new Set(env.selection) : new Set([hit.id])
+        const sel = info.shiftKey ? new Set(env.selection) : env.selection.has(hit.id) ? new Set(env.selection) : new Set<string>()
+        if (info.shiftKey && sel.has(hit.id)) { sel.delete(hit.id); env.setSelection(sel); return }
+        sel.add(hit.id)
         env.setSelection(sel)
-        documentStore.bringToFront(hit.id)
         const origins = new Map<string, { x: number; y: number }>()
-        for (const id of sel) {
+        for (const id of expandSelection(sel)) {
           const n = documentStore.getNode(id)
           if (n) origins.set(id, { x: n.x, y: n.y })
         }
-        state.dragging = {
-          type: 'move',
-          startWorld: info.world,
-          startScreen: info.screen,
-          origins,
-          moved: false,
-        }
+        state.dragging = { type: 'move', startWorld: info.world, startScreen: info.screen, origins, moved: false }
       } else {
-        env.setSelection(new Set())
-        state.dragging = {
-          type: 'marquee',
-          startWorld: info.world,
-          startScreen: info.screen,
-          rect: { x: info.world.x, y: info.world.y, width: 0, height: 0 },
-        }
+        const initialSelection = new Set(env.selection)
+        if (!info.shiftKey) env.setSelection(new Set())
+        state.dragging = { type: 'marquee', startWorld: info.world, startScreen: info.screen, currentWorld: info.world, initialSelection, selectionMode: info.shiftKey ? 'box' : 'paint', paintedSelection: new Set(), paintTrail: [info.world] }
+        if (info.shiftKey) env.setMarquee({ ...info.world, width: 0, height: 0 })
+        else env.setPaintTrail([info.world])
       }
     },
     onPointerMove(info, env, state) {
       const d = state.dragging
-      if (!d) return
-      if (d.type === 'move' && d.origins) {
-        const dx = info.world.x - d.startWorld.x
-        const dy = info.world.y - d.startWorld.y
-        if (Math.abs(dx) + Math.abs(dy) > 0.5) d.moved = true
-        if (d.moved) {
-          for (const [id, origin] of d.origins) {
-            documentStore.updateNode(id, { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) })
-          }
-        }
-      } else if (d.type === 'marquee' && d.rect) {
-        d.rect = {
-          x: Math.min(d.startWorld.x, info.world.x),
-          y: Math.min(d.startWorld.y, info.world.y),
-          width: Math.abs(info.world.x - d.startWorld.x),
-          height: Math.abs(info.world.y - d.startWorld.y),
-        }
-        env.setMarquee(d.rect)
+      if (d?.type === 'move' && d.origins) {
+        let dx = info.world.x - d.startWorld.x, dy = info.world.y - d.startWorld.y
+        if (Math.hypot(info.screen.x - d.startScreen.x, info.screen.y - d.startScreen.y) > 3) d.moved = true
+        if (info.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0 }
+        if (d.moved) documentStore.updateNodes(new Map([...d.origins].map(([id, origin]) => [id, { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) }])))
+      } else if (d?.type === 'marquee') {
+        updateSelectionDrag(info, env, state)
       }
     },
     onPointerUp(info, env, state) {
       const d = state.dragging
-      if (d?.type === 'marquee' && d.rect) {
-        env.setMarquee(null)
-        const doc = documentStore.getSnapshot()
-        const rects = (doc.nodes ?? []).map((n) => ({ id: n.id, x: n.x, y: n.y, width: n.width, height: n.height }))
-        const selected = new Set<string>()
-        for (const n of doc.nodes ?? []) {
-          const r = d.rect
-          if (n.x >= r.x && n.x + n.width <= r.x + r.width && n.y >= r.y && n.y + n.height <= r.y + r.height) {
-            selected.add(n.id)
-          }
-        }
-        void rects
-        if (selected.size > 0) env.setSelection(selected)
+      if (d?.type === 'marquee') {
+        updateSelectionDrag(info, env, state)
+        env.setMarquee(null); env.setPaintTrail(null)
       }
-      void info
+      if (d?.type === 'move' && d.moved && d.origins) updateMembership(d.origins.keys())
       state.dragging = null
     },
     onDoubleClick(info, env) {
-      const hit = topHitAt(info.world)
-      if (hit && (hit.type === 'text' || hit.type === 'image')) env.setEditingId(hit.id)
+      const hit = (info.nodeId ? documentStore.getNode(info.nodeId) : null) ?? topHitAt(info.world)
+      if (hit && (hit.type === 'text' || hit.type === 'group')) env.setEditingId(hit.id)
     },
   },
-
-  card: {
-    id: 'card',
-    onPointerDown(info, env) {
-      const node = createTextCard(info.world)
-      env.setSelection(new Set([node.id]))
-      env.setEditingId(node.id)
-    },
-  },
-
-  connect: {
-    id: 'connect',
-    onPointerDown(info, env, state) {
-      const hit = topHitAt(info.world)
-      if (hit) {
-        state.dragging = { type: 'connect', startWorld: info.world, startScreen: info.screen, fromId: hit.id }
-        env.setDragPreview({ fromId: hit.id, to: info.world })
-      }
-    },
-    onPointerMove(info, env, state) {
-      const d = state.dragging
-      if (d?.type === 'connect' && d.fromId) {
-        env.setDragPreview({ fromId: d.fromId, to: info.world })
-      }
-    },
-    onPointerUp(info, env, state) {
-      const d = state.dragging
-      env.setDragPreview(null)
-      if (d?.type === 'connect' && d.fromId) {
-        const hit = topHitAt(info.world)
-        if (hit && hit.id !== d.fromId) {
-          documentStore.addEdge({
-            id: uid(),
-            fromNode: d.fromId,
-            fromSide: 'right',
-            fromEnd: 'none',
-            toNode: hit.id,
-            toSide: 'left',
-            toEnd: 'arrow',
-          })
-        }
-      }
-      state.dragging = null
-    },
-  },
-
   box: {
     id: 'box',
-    onPointerDown(info, _env, state) {
-      state.dragging = {
-        type: 'box',
-        startWorld: info.world,
-        startScreen: info.screen,
-        rect: { x: info.world.x, y: info.world.y, width: 0, height: 0 },
-      }
-    },
+    onPointerDown(info, _env, state) { state.dragging = { type: 'box', startWorld: info.world, startScreen: info.screen, rect: { ...info.world, width: 0, height: 0 } } },
     onPointerMove(info, env, state) {
       const d = state.dragging
-      if (d?.type !== 'box' || !d.rect) return
-      d.rect = {
-        x: Math.min(d.startWorld.x, info.world.x),
-        y: Math.min(d.startWorld.y, info.world.y),
-        width: Math.abs(info.world.x - d.startWorld.x),
-        height: Math.abs(info.world.y - d.startWorld.y),
-      }
+      if (d?.type !== 'box') return
+      d.rect = { x: Math.min(d.startWorld.x, info.world.x), y: Math.min(d.startWorld.y, info.world.y), width: Math.abs(info.world.x - d.startWorld.x), height: Math.abs(info.world.y - d.startWorld.y) }
       env.setMarquee(d.rect)
     },
     onPointerUp(_info, env, state) {
       const d = state.dragging
       env.setMarquee(null)
-      if (d?.type === 'box' && d.rect && d.rect.width > 10 && d.rect.height > 10) {
-        const g: GroupNode = {
-          id: uid(),
-          type: 'group',
-          x: Math.round(d.rect.x),
-          y: Math.round(d.rect.y),
-          width: Math.round(d.rect.width),
-          height: Math.round(d.rect.height),
-          label: '分组',
-        }
+      if (d?.type === 'box' && d.rect && d.rect.width > 20 && d.rect.height > 20) {
+        const g: GroupNode = { id: uid(), type: 'group', ...d.rect, label: '分组', memberIds: [] }
+        g.memberIds = (documentStore.getSnapshot().nodes ?? []).filter((n) => contains(g, n)).map((n) => n.id)
         documentStore.addNode(g)
+        updateMembership([g.id])
+        env.setSelection(new Set([g.id]))
+        env.setTool('select')
       }
       state.dragging = null
     },
   },
-
   draw: {
     id: 'draw',
-    onPointerDown(info, _env, state) {
-      state.dragging = {
-        type: 'draw',
-        startWorld: info.world,
-        startScreen: info.screen,
-        points: [{ x: info.world.x, y: info.world.y }],
-      }
-    },
+    onPointerDown(info, _env, state) { state.dragging = { type: 'draw', startWorld: info.world, startScreen: info.screen, points: [{ ...info.world }] } },
     onPointerMove(info, _env, state) {
       const d = state.dragging
       if (d?.type === 'draw' && d.points) {
         const last = d.points[d.points.length - 1]
-        if (Math.hypot(info.world.x - last.x, info.world.y - last.y) > 2) {
-          d.points.push({ x: info.world.x, y: info.world.y })
-        }
+        if (Math.hypot(info.world.x - last.x, info.world.y - last.y) * cameraStore.getSnapshot().zoom > 1) d.points.push({ ...info.world })
       }
     },
-    onPointerUp(_info, _env, state) {
+    onPointerUp(info, env, state) {
       const d = state.dragging
-      if (d?.type === 'draw' && d.points && d.points.length > 1) {
-        const xs = d.points.map((p) => p.x)
-        const ys = d.points.map((p) => p.y)
-        const minX = Math.min(...xs)
-        const minY = Math.min(...ys)
-        const node: DrawNode = {
-          id: uid(),
-          type: 'draw',
-          x: minX,
-          y: minY,
-          width: Math.max(...xs) - minX,
-          height: Math.max(...ys) - minY,
-          points: d.points.map((p) => ({ x: p.x - minX, y: p.y - minY })),
-        }
+      if (d?.type === 'draw' && d.points) {
+        d.points.push({ ...info.world })
+        const xs = d.points.map((p) => p.x), ys = d.points.map((p) => p.y)
+        const x = Math.min(...xs), y = Math.min(...ys)
+        const node: DrawNode = { id: uid(), type: 'draw', x, y, width: Math.max(1, Math.max(...xs) - x), height: Math.max(1, Math.max(...ys) - y), points: d.points.map((p) => ({ x: p.x - x, y: p.y - y })), ...env.drawStyle }
         documentStore.addNode(node)
+        updateMembership([node.id])
       }
       state.dragging = null
     },

@@ -4,6 +4,10 @@ export interface Camera {
   zoom: number
 }
 
+export const MIN_ZOOM = 0.2
+export const MAX_ZOOM = 3
+export const clampZoom = (zoom: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom))
+
 type Listener = () => void
 
 export class CameraStore {
@@ -22,9 +26,9 @@ export class CameraStore {
 
   set(patch: Partial<Camera>) {
     this.camera = {
-      x: patch.x ?? this.camera.x,
-      y: patch.y ?? this.camera.y,
-      zoom: Math.min(4, Math.max(0.1, patch.zoom ?? this.camera.zoom)),
+      x: Number.isFinite(patch.x) ? patch.x! : this.camera.x,
+      y: Number.isFinite(patch.y) ? patch.y! : this.camera.y,
+      zoom: clampZoom(Number.isFinite(patch.zoom) ? patch.zoom! : this.camera.zoom),
     }
     this.emit()
   }

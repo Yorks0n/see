@@ -34,6 +34,9 @@ export interface ImageNode extends BaseNode {
   type: 'image'
   url: string
   text?: string
+  naturalWidth?: number
+  naturalHeight?: number
+  crop?: { x: number; y: number; width: number; height: number }
 }
 
 export interface GroupNode extends BaseNode {
@@ -41,6 +44,7 @@ export interface GroupNode extends BaseNode {
   label?: string
   background?: string
   backgroundStyle?: BackgroundStyle
+  memberIds?: string[]
 }
 
 export interface DrawPoint {
@@ -66,6 +70,9 @@ export interface CanvasEdge {
   toEnd?: EdgeEnd
   color?: CanvasColor
   label?: string
+  labelIsVisible?: boolean
+  labelOffset?: { x: number; y: number }
+  lineStyle?: 'curve' | 'straight'
 }
 
 export interface CanvasMeta {

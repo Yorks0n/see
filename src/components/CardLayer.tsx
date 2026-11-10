@@ -1,276 +1,135 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { ArrowLineDown, ArrowLineUp, Copy, Crop, File, Link, PencilSimple, SquaresFour, TextT, Trash, SelectionSlash, SplitVertical } from './icons'
 import type { Camera } from '../store/camera'
 import { documentStore } from '../store/document'
-import { PRESET_COLORS } from '../render/renderer'
-import { duplicateNodes } from '../tools/tools'
-import type { CanvasColor, CanvasFile, ImageNode, TextNode } from '../types'
-
-const COLOR_KEYS = ['1', '2', '3', '4', '5', '6'] as const
+import { resolveColor, strokePath } from '../render/renderer'
+import { deleteNodes, duplicateNodes, groupNodes, splitImageCaption, type ToolId } from '../tools/tools'
+import type { CanvasFile, CanvasNode, ImageNode } from '../types'
+import { IconButton } from './IconButton'
+import { StylePalette } from './StylePalette'
+import { ResizeHandles } from './ResizeHandles'
 
 export function CardLayer(props: {
-  doc: CanvasFile
-  camera: Camera
-  selection: Set<string>
-  setSelection: (s: Set<string>) => void
-  editingId: string | null
-  setEditingId: (id: string | null) => void
+  doc: CanvasFile; camera: Camera; selection: Set<string>; setSelection: (s: Set<string>) => void
+  editingId: string | null; setEditingId: (id: string | null) => void; tool: ToolId
+  onTextEditDone: (id: string, text: string) => void
+  targetId?: string; cropId: string | null; onImageCrop: (node: ImageNode) => void
+  interacting: boolean
 }) {
   const { doc, camera, selection } = props
-  const layerRef = useRef<HTMLDivElement>(null)
-  const cards = (doc.nodes ?? []).filter((n) => n.type === 'text' || n.type === 'image')
-
-  return (
-    <div className="card-layer" ref={layerRef}>
-      {cards.map((n) =>
-        n.type === 'image' ? (
-          <ImageCard
-            key={n.id}
-            node={n}
-            camera={camera}
-            selected={selection.has(n.id)}
-            editing={props.editingId === n.id}
-            onEditDone={(text) => {
-              documentStore.updateNode(n.id, { text })
-              props.setEditingId(null)
-            }}
-            onStartEdit={() => props.setEditingId(n.id)}
-          />
-        ) : (
-          <Card
-            key={n.id}
-            node={n as TextNode}
-            camera={camera}
-            selected={selection.has(n.id)}
-            editing={props.editingId === n.id}
-            onEditDone={(text) => {
-              documentStore.updateNode(n.id, { text })
-              props.setEditingId(null)
-            }}
-            onStartEdit={() => props.setEditingId(n.id)}
-          />
-        ),
-      )}
-      {selection.size > 0 && props.editingId === null && (
-        <SelectionBar
-          doc={doc}
-          camera={camera}
-          selection={selection}
-          setSelection={props.setSelection}
-          layerWidth={layerRef.current?.clientWidth ?? 0}
-          layerHeight={layerRef.current?.clientHeight ?? 0}
-        />
-      )}
-    </div>
-  )
-}
-
-function SelectionBar(props: {
-  doc: CanvasFile
-  camera: Camera
-  selection: Set<string>
-  setSelection: (s: Set<string>) => void
-  layerWidth: number
-  layerHeight: number
-}) {
-  const { doc, camera, selection } = props
-  const nodes = (doc.nodes ?? []).filter((n) => selection.has(n.id))
-  if (nodes.length === 0) return null
-
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const n of nodes) {
-    minX = Math.min(minX, n.x)
-    minY = Math.min(minY, n.y)
-    maxX = Math.max(maxX, n.x + n.width)
-    maxY = Math.max(maxY, n.y + n.height)
-  }
-  const centerX = ((minX + maxX) / 2) * camera.zoom + camera.x
-  const topScreen = minY * camera.zoom + camera.y
-  const bottomScreen = maxY * camera.zoom + camera.y
-  const BAR_HEIGHT = 40
-  let top = topScreen - BAR_HEIGHT - 8
-  if (top < 4) top = bottomScreen + 8
-  const maxLeft = (props.layerWidth || window.innerWidth) - 100
-  const left = Math.min(Math.max(centerX, 100), Math.max(100, maxLeft))
-
-  const remove = () => {
-    for (const id of selection) {
-      if (documentStore.getNode(id)) documentStore.deleteNode(id)
-    }
-    props.setSelection(new Set())
-  }
-
-  const duplicate = () => {
-    props.setSelection(duplicateNodes(selection))
-  }
-
-  const showColors = nodes.some((n) => n.type !== 'image')
-
-  const recolor = (color?: CanvasColor) => {
-    for (const id of selection) documentStore.updateNode(id, { color })
-  }
-
-  return (
-    <div className="selection-bar" style={{ left, top }} onPointerDown={(e) => e.stopPropagation()}>
-      <button className="sel-btn" title="复制 (Ctrl/⌘+D)" onClick={duplicate}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="9" y="9" width="12" height="12" rx="2" />
-          <path d="M5 15V5a2 2 0 0 1 2-2h10" />
-        </svg>
-      </button>
-      {showColors && (
-        <>
-          <span className="sel-sep" />
-          {COLOR_KEYS.map((c) => (
-            <button
-              key={c}
-              className="sel-dot"
-              style={{ background: PRESET_COLORS[c] }}
-              title={`颜色 ${c}`}
-              onClick={() => recolor(c)}
-            />
-          ))}
-          <button className="sel-dot clear" title="默认颜色" onClick={() => recolor(undefined)} />
-          <span className="sel-sep" />
-        </>
-      )}
-      <button className="sel-btn danger" title="删除 (Delete)" onClick={remove}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M3 6h18" />
-          <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
-          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-          <path d="M10 11v6M14 11v6" />
-        </svg>
-      </button>
-    </div>
-  )
-}
-
-function Card(props: {
-  node: TextNode
-  camera: Camera
-  selected: boolean
-  editing: boolean
-  onEditDone: (text: string) => void
-  onStartEdit: () => void
-}) {
-  const { node, camera } = props
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (props.editing && ref.current) {
-      ref.current.focus()
-      const range = document.createRange()
-      range.selectNodeContents(ref.current)
-      const sel = window.getSelection()
-      sel?.removeAllRanges()
-      sel?.addRange(range)
-    }
-  }, [props.editing])
-
-  const left = node.x * camera.zoom + camera.x
-  const top = node.y * camera.zoom + camera.y
-
-  return (
-    <div
-      className={props.selected ? 'card selected' : 'card'}
-      data-color={node.color}
-      style={{
-        left,
-        top,
-        width: node.width * camera.zoom,
-        minHeight: node.height * camera.zoom,
-        fontSize: 14 * camera.zoom,
-      }}
-      onDoubleClick={(e) => {
-        e.stopPropagation()
-        props.onStartEdit()
-      }}
-    >
-      <div
-        ref={ref}
-        className="card-text"
-        contentEditable={props.editing}
-        suppressContentEditableWarning
-        onBlur={(e) => props.onEditDone(e.currentTarget.textContent ?? '')}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') (e.target as HTMLElement).blur()
-          e.stopPropagation()
-        }}
-      >
-        {node.text || (props.editing ? '' : '双击编辑')}
+  const [captionDraft, setCaptionDraft] = useState<{ id: string; text: string } | null>(null)
+  const selectedNodes = (doc.nodes ?? []).filter((n) => selection.has(n.id))
+  const active = props.tool === 'select'
+  const connected = new Set((doc.edges ?? []).flatMap((e) => [e.fromNode, e.toNode]))
+  return <div className={`card-layer ${active ? '' : 'pass-through'}`}>
+    {(doc.nodes ?? []).map((node) => {
+      const selected = selection.has(node.id), editing = props.editingId === node.id
+      if (node.type === 'draw') return <svg key={node.id} className={`draw-block ${selected ? 'selected' : ''}`} data-node-id={node.id} aria-label="手绘笔迹" style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
+        <g transform={`scale(${camera.zoom})`}>
+          {selected && <path className="draw-selection" d={strokePath(node.points)} strokeWidth={(node.strokeWidth ?? 3) + 10 / camera.zoom} />}
+          <path className="draw-line" d={strokePath(node.points)} stroke={resolveColor(node.color, '#44434d')} strokeWidth={node.strokeWidth ?? 3} />
+          <path className="draw-hit" d={strokePath(node.points)} strokeWidth={(node.strokeWidth ?? 3) + 14 / camera.zoom} />
+        </g>
+      </svg>
+      if (node.type === 'group') return <div key={node.id} className={`group-label ${selected ? 'selected' : ''}`} data-node-id={node.id} style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y - 29, maxWidth: node.width * camera.zoom, color: resolveColor(node.color, '#8c8599') }} onDoubleClick={(e) => { e.stopPropagation(); props.setEditingId(node.id) }}>
+        <SquaresFour size={15} /><EditableText text={node.label || '分组'} editing={editing} className="group-name" onDone={(label) => { documentStore.updateNode(node.id, { label: label || '分组' }); props.setEditingId(null) }} />
       </div>
-    </div>
-  )
+      return <div key={node.id} data-node-id={node.id} className={`block-wrapper ${selected ? 'selected' : ''} ${connected.has(node.id) ? 'connected' : ''} ${props.targetId === node.id ? 'connection-target' : ''}`} style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
+        {node.type === 'image' ? <ImageCard node={node} camera={camera} selected={selected} editing={editing} draft={editing && captionDraft?.id === node.id ? captionDraft.text : node.text ?? ''} onInput={(text) => setCaptionDraft({ id: node.id, text })} onDone={(text) => { documentStore.updateNode(node.id, { text: text.trim() ? text : undefined }); setCaptionDraft(null); props.setEditingId(null) }} onCrop={() => props.onImageCrop(node)} />
+          : node.type === 'text' ? <TextCard node={node} camera={camera} editing={editing} selected={selected} onDone={(text) => props.onTextEditDone(node.id, text)} onEdit={() => props.setEditingId(node.id)} />
+          : <div className={`card resource-card ${selected ? 'selected' : ''}`} style={{ fontSize: 14 * camera.zoom, padding: 12 * camera.zoom }}><span>{node.type === 'link' ? <Link size={18} /> : <File size={18} />}</span><span>{node.type === 'link' ? node.url : node.file}</span></div>}
+        {!editing && <button className="block-connect" data-connect-id={node.id} style={{ top: Math.min(20, node.height / 2) * camera.zoom - 9, color: resolveColor(node.color, '#609fbb') }} aria-label="拖动圆点连接 block" title="拖动连接到其他 block；拖到空白处创建关联卡片"><span /></button>}
+      </div>
+    })}
+    {active && !props.interacting && selectedNodes.length > 0 && (props.editingId === null || (selectedNodes.length === 1 && selectedNodes[0].type === 'image')) && <SelectionBar {...props} nodes={selectedNodes} captionDraft={captionDraft} />}
+    {active && props.editingId === null && !props.cropId && !props.interacting && selectedNodes.length === 1 && <ResizeHandles node={selectedNodes[0]} camera={camera} />}
+  </div>
 }
-
-function ImageCard(props: {
-  node: ImageNode
-  camera: Camera
-  selected: boolean
-  editing: boolean
-  onEditDone: (text: string) => void
-  onStartEdit: () => void
-}) {
-  const { node, camera } = props
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (props.editing && ref.current) {
-      ref.current.focus()
-      const range = document.createRange()
-      range.selectNodeContents(ref.current)
-      range.collapse(false)
-      const sel = window.getSelection()
-      sel?.removeAllRanges()
-      sel?.addRange(range)
-    }
-  }, [props.editing])
-
-  const left = node.x * camera.zoom + camera.x
-  const top = node.y * camera.zoom + camera.y
-  const hasText = !!node.text
-  const className = 'card image' + (hasText || props.editing ? ' has-text' : '') + (props.selected ? ' selected' : '')
-
-  return (
-    <div
-      className={className}
-      style={{ left, top, width: node.width * camera.zoom }}
-      onDoubleClick={(e) => {
-        e.stopPropagation()
-        props.onStartEdit()
-      }}
-    >
-      <img
-        src={node.url}
-        alt=""
-        draggable={false}
-        onLoad={(e) => {
-          const img = e.currentTarget
-          if (img.naturalWidth > 0) {
-            const h = Math.round((img.naturalHeight / img.naturalWidth) * node.width)
-            if (Math.abs(h - node.height) > 1) documentStore.updateNode(node.id, { height: h })
-          }
-        }}
-      />
-      {(hasText || props.editing) && (
-        <div
-          ref={ref}
-          className={props.editing ? 'image-caption editing' : 'image-caption'}
-          contentEditable={props.editing}
-          suppressContentEditableWarning
-          style={{ fontSize: 13 * camera.zoom }}
-          onBlur={(e) => props.onEditDone(e.currentTarget.textContent ?? '')}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') (e.target as HTMLElement).blur()
-            e.stopPropagation()
-          }}
-        >
-          {node.text}
-        </div>
-      )}
+function SelectionBar(props: Parameters<typeof CardLayer>[0] & { nodes: CanvasNode[]; captionDraft: { id: string; text: string } | null }) {
+  const { nodes, camera } = props
+  const one = nodes.length === 1 ? nodes[0] : null
+  const captionEditing = one?.type === 'image' && props.editingId === one.id
+  const caption = one?.type === 'image' ? props.captionDraft?.id === one.id ? props.captionDraft.text : one.text ?? '' : ''
+  const run = (action: () => void) => {
+    if (captionEditing) (document.activeElement as HTMLElement | null)?.blur()
+    action()
+  }
+  const minX = Math.min(...nodes.map((n) => n.x)), minY = Math.min(...nodes.map((n) => n.y))
+  const maxX = Math.max(...nodes.map((n) => n.x + n.width)), maxY = Math.max(...nodes.map((n) => n.y + n.height))
+  const topScreen = minY * camera.zoom + camera.y
+  const barHeight = nodes.some((n) => n.type !== 'image') ? 82 : 46
+  const gap = one?.type === 'group' ? 38 : 12
+  const top = topScreen < barHeight + gap + 8 ? maxY * camera.zoom + camera.y + 16 : topScreen - barHeight - gap
+  const recolor = (color?: CanvasNode['color']) => documentStore.transact(() => nodes.forEach((n) => documentStore.updateNode(n.id, { color })))
+  return <div className="selection-bar floating-panel" style={{ left: `clamp(170px, ${((minX + maxX) / 2) * camera.zoom + camera.x}px, calc(100% - 170px))`, top: `clamp(12px, ${top}px, calc(100% - 105px))` }} onPointerDown={(e) => { e.stopPropagation(); if (captionEditing) e.preventDefault() }}>
+    <div className="selection-actions">
+      {one?.type === 'image' && <>
+        <IconButton icon={Crop} label="裁剪图片" active={props.cropId === one.id} onClick={() => run(() => props.onImageCrop(one))} />
+        <IconButton icon={TextT} label="编辑图片说明" active={captionEditing} onClick={() => { if (!captionEditing) { if (props.cropId === one.id) props.onImageCrop(one); props.setEditingId(one.id) } }} />
+        {!!caption.trim() && <IconButton icon={SplitVertical} label="Split · 拆分为文本块" onClick={() => run(() => { const card = splitImageCaption(one.id, caption); if (card) props.setSelection(new Set([card.id])) })} />}
+      </>}
+      {(one?.type === 'text' || one?.type === 'group') && <IconButton icon={PencilSimple} label={one.type === 'group' ? '重命名分组' : '编辑文字'} onClick={() => props.setEditingId(one.id)} />}
+      {nodes.length > 1 && <IconButton icon={SquaresFour} label="组合所选内容 · ⌘/Ctrl G" onClick={() => { const group = groupNodes(props.selection); if (group) props.setSelection(new Set([group.id])) }} />}
+      {one?.type === 'group' && <IconButton icon={SelectionSlash} label="解除分组 · ⌘/Ctrl ⇧ G" onClick={() => { const members = one.memberIds ?? []; documentStore.deleteNode(one.id); props.setSelection(new Set(members)) }} />}
+      <IconButton icon={Copy} label="创建副本 · ⌘/Ctrl D" onClick={() => run(() => props.setSelection(duplicateNodes(props.selection)))} />
+      <IconButton icon={ArrowLineUp} label="置于顶层" onClick={() => run(() => documentStore.transact(() => nodes.forEach((n) => documentStore.bringToFront(n.id))))} />
+      <IconButton icon={ArrowLineDown} label="置于底层" onClick={() => run(() => documentStore.transact(() => [...nodes].reverse().forEach((n) => documentStore.sendToBack(n.id))))} />
+      <IconButton icon={Trash} label="删除所选内容 · Delete" className="danger" onClick={() => run(() => { deleteNodes(props.selection); props.setSelection(new Set()) })} />
     </div>
-  )
+    {nodes.some((n) => n.type !== 'image') && <div className="selection-styles"><StylePalette color={one?.color} onChange={recolor} />{one?.type === 'draw' && <StrokeWidths value={one.strokeWidth ?? 3} onChange={(strokeWidth) => documentStore.updateNode(one.id, { strokeWidth })} />}</div>}
+  </div>
+}
+export function StrokeWidths({ value, onChange }: { value: number; onChange: (width: number) => void }) {
+  return <div className="stroke-widths" role="group" aria-label="笔画粗细">{[2, 4, 8].map((width) => <button key={width} className={`stroke-option ${width === value ? 'active' : ''}`} aria-label={`笔画粗细 ${width}`} title={`笔画粗细 ${width}`} aria-pressed={width === value} onClick={() => onChange(width)}><span style={{ height: width }} /></button>)}</div>
+}
+function EditableText({ text, editing, className, onDone, onInput, placeholder = '', style }: { text: string; editing: boolean; className: string; onDone: (text: string) => void; onInput?: (text: string) => void; placeholder?: string; style?: React.CSSProperties }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const initial = useRef(text)
+  useEffect(() => {
+    if (!editing || !ref.current) return
+    initial.current = text
+    documentStore.beginInteraction()
+    ref.current.textContent = text
+    ref.current.focus()
+    const range = document.createRange()
+    range.selectNodeContents(ref.current)
+    range.collapse(false)
+    const selection = window.getSelection()
+    selection?.removeAllRanges(); selection?.addRange(range)
+  }, [editing])
+  return <div ref={ref} className={`${className} ${editing ? 'editing' : ''}`} style={style} contentEditable={editing} suppressContentEditableWarning data-placeholder={placeholder}
+    onPointerDown={(e) => { if (editing) e.stopPropagation() }} onPointerMove={(e) => { if (editing) e.stopPropagation() }} onPointerUp={(e) => { if (editing) e.stopPropagation() }}
+    onInput={(e) => onInput?.(e.currentTarget.innerText)}
+    onBlur={(e) => { if (!editing) return; onDone(e.currentTarget.innerText); documentStore.endInteraction() }}
+    onKeyDown={(e) => { if (!editing) return; e.stopPropagation(); if (e.key === 'Escape') { e.currentTarget.textContent = initial.current; e.currentTarget.blur() } if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') e.currentTarget.blur() }}
+  >{text}</div>
+}
+function TextCard({ node, camera, selected, editing, onDone, onEdit }: { node: Extract<CanvasNode, { type: 'text' }>; camera: Camera; selected: boolean; editing: boolean; onDone: (text: string) => void; onEdit: () => void }) {
+  const cardRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    let active = true
+    const measure = () => {
+      const el = cardRef.current?.querySelector('.card-text')
+      const current = documentStore.getNode(node.id)
+      if (active && el && current && !editing && el.scrollHeight > current.height - 23) documentStore.updateTextLayout(node.id, Math.ceil(el.scrollHeight + 24))
+    }
+    measure()
+    void document.fonts.ready.then(measure)
+    return () => { active = false }
+  }, [node.text, node.width, editing])
+  return <div ref={cardRef} className={`card text-card ${selected ? 'selected' : ''}`} data-color={node.color} style={{ padding: `${10 * camera.zoom}px ${12 * camera.zoom}px`, ...(node.color?.startsWith('#') ? { background: `color-mix(in srgb, ${node.color} 18%, white)` } : {}) }} onDoubleClick={(e) => { e.stopPropagation(); onEdit() }}>
+    <EditableText text={node.text} editing={editing} className="card-text" style={{ width: Math.max(1, node.width - 26), fontSize: 14, transform: `scale(${camera.zoom})`, transformOrigin: 'top left', maxHeight: editing ? node.height - 24 : undefined }} onDone={onDone} />
+  </div>
+}
+function ImageCard({ node, camera, selected, editing, draft, onInput, onDone, onCrop }: { node: ImageNode; camera: Camera; selected: boolean; editing: boolean; draft: string; onInput: (text: string) => void; onDone: (text: string) => void; onCrop: () => void }) {
+  const [failed, setFailed] = useState(false)
+  const crop = node.crop ?? { x: 0, y: 0, width: 1, height: 1 }
+  return <div className={`card image-card ${selected ? 'selected' : ''}`} onDoubleClick={(e) => { e.stopPropagation(); onCrop() }}>
+    <div className="image-viewport"><img src={node.url} alt={node.text || '白板图片'} draggable={false} style={{ width: `${100 / crop.width}%`, height: `${100 / crop.height}%`, left: `${-crop.x / crop.width * 100}%`, top: `${-crop.y / crop.height * 100}%` }} onError={() => setFailed(true)} onLoad={(e) => {
+      setFailed(false)
+      const img = e.currentTarget
+      if (!node.naturalWidth && img.naturalWidth > 0) documentStore.initializeImage(node.id, img.naturalWidth, img.naturalHeight)
+    }} />{failed && <span className="image-error">图片加载失败</span>}</div>
+    {(node.text?.trim() || editing) && <EditableText text={node.text ?? ''} editing={editing} className={`image-caption ${!draft.trim() ? 'empty' : ''}`} placeholder="为图片添加说明…" style={{ fontSize: 13 * camera.zoom, padding: `${8 * camera.zoom}px ${10 * camera.zoom}px` }} onInput={onInput} onDone={onDone} />}
+  </div>
 }

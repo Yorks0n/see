@@ -8,25 +8,17 @@ import type { ToolId } from './tools/tools'
 
 export default function App() {
   const [tool, setTool] = useState<ToolId>('select')
+  const [newNodeId, setNewNodeId] = useState<string | null>(null)
+  const [uiVisible, setUiVisible] = useState(true)
 
   useEffect(() => {
     void loadLocal().then((doc) => {
-      if (doc && (doc.nodes?.length ?? 0) > 0) {
+      if (doc) {
         documentStore.load(doc)
         if (doc.meta?.camera) cameraStore.set(doc.meta.camera)
       } else {
         documentStore.load({
-          nodes: [
-            {
-              id: 'welcome',
-              type: 'text',
-              x: 120,
-              y: 100,
-              width: 320,
-              height: 120,
-              text: '欢迎使用白板 👋\n\n双击空白处新建卡片；滚轮平移画布，Ctrl/⌘+滚轮缩放；按住空格拖动平移；粘贴剪贴板图片自动新建图片卡片。数据自动保存，可导出 .canvas 文件。',
-            },
-          ],
+          nodes: [],
           edges: [],
           meta: { name: '我的白板' },
         })
@@ -35,9 +27,9 @@ export default function App() {
   }, [])
 
   return (
-    <div className="app">
-      <Toolbar tool={tool} setTool={setTool} />
-      <Board tool={tool} setTool={setTool} />
+    <div className={`app ${uiVisible ? '' : 'ui-hidden'}`}>
+      <Toolbar tool={tool} setTool={setTool} onSelectNode={setNewNodeId} />
+      <Board tool={tool} setTool={setTool} newNodeId={newNodeId} uiVisible={uiVisible} onToggleUI={() => setUiVisible((visible) => !visible)} />
     </div>
   )
 }
