@@ -7,7 +7,8 @@ import { updateMembership } from '../tools/tools'
 const corners = ['nw', 'ne', 'se', 'sw'] as const
 export function ResizeHandles({ node, camera }: { node: CanvasNode; camera: Camera }) {
   const drag = useRef<{ node: CanvasNode; x: number; y: number; corner: string } | null>(null)
-  const compact = node.type === 'image' || node.type === 'text'
+  const list = node.type === 'group' && node.layout === 'list'
+  const compact = node.type === 'image' || node.type === 'text' || node.type === 'rectangle' || list
   const handles = compact ? ['se'] as const : corners
   useEffect(() => {
     const cancel = () => { if (drag.current) { drag.current = null; documentStore.cancelInteraction() } }
@@ -21,7 +22,7 @@ export function ResizeHandles({ node, camera }: { node: CanvasNode; camera: Came
     return () => { window.removeEventListener('keydown', onKey, true); window.removeEventListener('blur', cancel); cancel() }
   }, [])
   return <div className="resize-bounds" style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
-    {handles.map((corner) => <button key={corner} className={`resize-handle ${corner}${compact ? ' corner-resize-handle' : ''}`} aria-label={node.type === 'image' ? '调整图片大小' : node.type === 'text' ? '调整文本块大小' : `缩放 ${corner}`} title={node.type === 'image' ? '拖动等比缩放 · Shift 自由缩放' : '拖动调整大小 · Shift 等比缩放'}
+    {handles.map((corner) => <button key={corner} className={`resize-handle ${corner}${compact ? ' corner-resize-handle' : ''}`} aria-label={list ? '调整列表大小' : node.type === 'rectangle' ? '调整矩形大小' : node.type === 'image' ? '调整图片大小' : node.type === 'text' ? '调整文本块大小' : `缩放 ${corner}`} title={node.type === 'image' ? '拖动等比缩放 · Shift 自由缩放' : '拖动调整大小 · Shift 等比缩放'}
       onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); documentStore.beginInteraction(); drag.current = { node, x: e.clientX, y: e.clientY, corner } }}
       onPointerMove={(e) => {
         const d = drag.current
@@ -38,7 +39,8 @@ export function ResizeHandles({ node, camera }: { node: CanvasNode; camera: Came
         }
         const patch: Partial<CanvasNode> = { x: west ? d.node.x + d.node.width - width : d.node.x, y: north ? d.node.y + d.node.height - height : d.node.y, width, height }
         if (d.node.type === 'draw') Object.assign(patch, { points: d.node.points.map((p) => ({ x: p.x * width / d.node.width, y: p.y * height / d.node.height })) })
-        documentStore.updateNode(node.id, patch)
+        if (list) documentStore.resizeList(node.id, width, height)
+        else documentStore.updateNode(node.id, patch)
       }}
       onPointerUp={(e) => { e.stopPropagation(); if (!drag.current) return; drag.current = null; updateMembership([node.id]); documentStore.endInteraction(); e.currentTarget.releasePointerCapture(e.pointerId) }}
       onPointerCancel={(e) => { e.stopPropagation(); drag.current = null; documentStore.cancelInteraction() }}

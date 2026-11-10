@@ -1,4 +1,5 @@
 import type { CanvasEdge, CanvasFile, CanvasNode, NodeSide } from '../types'
+import { layoutLists } from '../tools/layout'
 
 type Listener = () => void
 
@@ -7,7 +8,7 @@ const uid = () =>
 
 const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
-const NODE_TYPES = new Set(['text', 'file', 'link', 'image', 'group', 'draw'])
+const NODE_TYPES = new Set(['text', 'file', 'link', 'image', 'group', 'draw', 'rectangle'])
 const SIDES: NodeSide[] = ['top', 'right', 'bottom', 'left']
 
 export function restoreNode(raw: unknown): CanvasNode | null {
@@ -26,6 +27,8 @@ export function restoreNode(raw: unknown): CanvasNode | null {
     color: typeof n.color === 'string' ? (n.color as CanvasNode['color']) : undefined,
   }
   switch (n.type) {
+    case 'rectangle':
+      return { ...base, type: 'rectangle' }
     case 'text':
       return { ...base, type: 'text', text: typeof n.text === 'string' ? n.text : '' }
     case 'file':
@@ -49,7 +52,8 @@ export function restoreNode(raw: unknown): CanvasNode | null {
     }
     case 'group':
       return {
-        ...base, type: 'group', label: typeof n.label === 'string' ? n.label : undefined,
+        ...base, type: 'group', layout: n.layout === 'list' ? 'list' : undefined, label: typeof n.label === 'string' ? n.label : undefined,
+        minHeight: isFiniteNumber(n.minHeight) ? Math.max(140, n.minHeight) : undefined,
         memberIds: Array.isArray(n.memberIds) ? n.memberIds.filter((id): id is string => typeof id === 'string' && id !== n.id) : undefined,
         background: typeof n.background === 'string' ? n.background : undefined,
         backgroundStyle: ['cover', 'ratio', 'repeat', 'center'].includes(n.backgroundStyle as string)
@@ -122,7 +126,7 @@ export class DocumentStore {
       this.past = [...this.past.slice(-79), this.doc]
       this.future = []
     }
-    this.doc = next
+    this.doc = this.interaction ? next : layoutLists(next)
     this.emit()
   }
 
@@ -132,6 +136,7 @@ export class DocumentStore {
   endInteraction() {
     if (!this.interaction) return
     if (this.doc !== this.interaction) {
+      this.doc = layoutLists(this.doc)
       this.past = [...this.past.slice(-79), this.interaction]
       this.future = []
     }
@@ -176,7 +181,7 @@ export class DocumentStore {
   }
 
   load(file: CanvasFile) {
-    this.doc = restoreCanvas(file)
+    this.doc = layoutLists(restoreCanvas(file))
     this.past = []
     this.future = []
     this.interaction = null
@@ -184,6 +189,10 @@ export class DocumentStore {
   }
   toJSON(): CanvasFile {
     return JSON.parse(JSON.stringify(this.doc))
+  }
+  rename(name: string) {
+    const value = name.trim() || '未命名画布'
+    if (value !== this.doc.meta?.name) this.commit({ ...this.doc, meta: { ...this.doc.meta, name: value } })
   }
 
   getNode(id: string) {
@@ -212,18 +221,30 @@ export class DocumentStore {
       return patch ? { ...n, ...patch, id: n.id, type: n.type } as CanvasNode : n
     }) })
   }
+  resizeList(id: string, width: number, height: number) {
+    const node = this.getNode(id)
+    if (node?.type !== 'group' || node.layout !== 'list') return
+    this.commit(layoutLists({
+      ...this.doc,
+      nodes: this.doc.nodes?.map((n) => n.id === id ? { ...node, width: Math.max(160, width), minHeight: Math.max(140, height) } : n),
+    }))
+  }
   updateTextLayout(id: string, height: number) {
     const node = this.getNode(id)
-    if (node?.type !== 'text' || height <= node.height) return
+    const inList = this.doc.nodes?.some((n) => n.type === 'group' && n.layout === 'list' && n.memberIds?.includes(id))
+    if (node?.type !== 'text' || (inList ? height === node.height : height <= node.height)) return
     // Content measurement should not create a second undo step after typing.
-    const measure = (doc: CanvasFile): CanvasFile => ({
-      ...doc,
-      nodes: doc.nodes?.map((n) => n.id === id && n.type === 'text' && n.text === node.text && n.width === node.width && n.height < height
-        ? { ...n, height } : n),
-    })
-    this.doc = measure(this.doc)
-    this.past = this.past.map(measure)
-    this.future = this.future.map(measure)
+    const measure = (doc: CanvasFile): CanvasFile => {
+      const fit = inList && doc.nodes?.some((n) => n.type === 'group' && n.layout === 'list' && n.memberIds?.includes(id))
+      return {
+        ...doc,
+        nodes: doc.nodes?.map((n) => n.id === id && n.type === 'text' && n.text === node.text && n.width === node.width && (fit || n.height < height)
+          ? { ...n, height } : n),
+      }
+    }
+    this.doc = layoutLists(measure(this.doc))
+    this.past = this.past.map((doc) => layoutLists(measure(doc)))
+    this.future = this.future.map((doc) => layoutLists(measure(doc)))
     if (this.interaction) this.interaction = measure(this.interaction)
     this.emit()
   }
@@ -234,14 +255,14 @@ export class DocumentStore {
       nodes: doc.nodes?.map((node) => node.id === id && node.type === 'image' && !node.naturalWidth
         ? {
             ...node, naturalWidth, naturalHeight,
-            ...(!node.crop && node.width === 280 && node.height === 180
+            ...(!node.crop && ((node.width === 280 && node.height === 180) || doc.nodes?.some((g) => g.type === 'group' && g.layout === 'list' && g.memberIds?.includes(id)))
               ? { height: node.width * naturalHeight / naturalWidth } : {}),
           }
         : node),
     })
-    this.doc = hydrate(this.doc)
-    this.past = this.past.map(hydrate)
-    this.future = this.future.map(hydrate)
+    this.doc = layoutLists(hydrate(this.doc))
+    this.past = this.past.map((doc) => layoutLists(hydrate(doc)))
+    this.future = this.future.map((doc) => layoutLists(hydrate(doc)))
     if (this.interaction) this.interaction = hydrate(this.interaction)
     this.emit()
   }

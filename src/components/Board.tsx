@@ -3,7 +3,7 @@ import { X } from './icons'
 import { cameraStore, clampZoom } from '../store/camera'
 import { documentStore } from '../store/document'
 import { hitTest, renderInteractiveScene, renderStaticScene } from '../render/renderer'
-import { createImageCard, createTextCard, deleteNodes, duplicateNodes, expandSelection, finishConnection, groupNodes, moveConnection, startConnection, tools, ToolState, updateMembership, viewportCenterWorld, type DrawStyle, type PointerInfo, type ToolId, type ToolEnv } from '../tools/tools'
+import { createImageCard, createTextCard, deleteNodes, duplicateNodes, expandSelection, finishConnection, groupNodes, ungroupNodes, moveConnection, startConnection, tools, ToolState, updateMembership, viewportCenterWorld, type DrawStyle, type PointerInfo, type ToolId, type ToolEnv } from '../tools/tools'
 import { saveLocal, saveRecovery } from '../persistence'
 import type { DrawPoint, ImageNode } from '../types'
 import { CardLayer, StrokeWidths } from './CardLayer'
@@ -13,7 +13,11 @@ import { IconButton } from './IconButton'
 import { StylePalette } from './StylePalette'
 import { CanvasControls } from './CanvasControls'
 import { preferencesStore } from '../store/preferences'
-import { copySelection, pasteSelection, readClipboard, writeClipboard } from '../tools/clipboard'
+import { copySelection, copyToSystemClipboard, pasteSelection, readClipboard, readSystemClipboard, writeClipboard } from '../tools/clipboard'
+import { runBoardCommand, type BoardCommand } from '../shortcuts'
+import { selectionSVG, svgPNG, downloadBlob } from '../tools/export'
+import { ShortcutsDialog } from './ShortcutsDialog'
+import { CanvasContextMenu, type ContextTarget } from './CanvasContextMenu'
 
 const IMAGE_URL_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|avif|svg|bmp)(\?\S*)?$/i
 const isTypingTarget = (e: Event) => { const t = e.target as HTMLElement | null; return !!t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) }
@@ -43,6 +47,9 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const [interacting, setInteracting] = useState(false)
   const [cropId, setCropId] = useState<string | null>(null)
   const [helpOpen, setHelpOpen] = useState(false)
+  const [contextMenu, setContextMenu] = useState<ContextTarget | null>(null)
+  const [error, setError] = useState('')
+  const [listDrop, setListDrop] = useState<{ id: string; y: number } | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const sceneRef = useRef({ doc, camera, selection, marquee, paintTrail, activeStroke, drawStyle })
   sceneRef.current = { doc, camera, selection, marquee, paintTrail, activeStroke, drawStyle }
@@ -103,6 +110,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
       setSelection((selected) => new Set([...selected].filter((nodeId) => nodeId !== id)))
     }
     setDragPreview(null); setMarquee(null); setPaintTrail(null); setActiveStroke(null); setInteracting(false)
+    setListDrop(null)
   }, [])
   const onTextEditDone = (id: string, text: string) => {
     if (draftCardRef.current === id) {
@@ -120,6 +128,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 && e.button !== 1) return
     if ((e.target as HTMLElement).isContentEditable) return
+    setContextMenu(null)
     if (cropId) setCropId(null)
     const focused = document.activeElement as HTMLElement | null
     if (focused?.isContentEditable) focused.blur()
@@ -138,6 +147,17 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   }
   const onPointerMove = (e: React.PointerEvent) => {
     const info = toPointerInfo(e)
+    if (state.dragging?.type === 'move' && state.dragging.origins) {
+      const moved = state.dragging.origins
+      const canDrop = [...moved.keys()].every((id) => ['text', 'image'].includes(documentStore.getNode(id)?.type ?? ''))
+      const list = canDrop ? (doc.nodes ?? []).find((n) => n.type === 'group' && n.layout === 'list' && info.world.x >= n.x && info.world.x <= n.x + n.width && info.world.y >= n.y && info.world.y <= n.y + n.height) : undefined
+      if (list?.type === 'group') {
+        const members = (list.memberIds ?? []).flatMap((id) => { const n = documentStore.getNode(id); return n && !moved.has(id) ? [n] : [] })
+        const next = members.find((n) => info.world.y < n.y + n.height / 2)
+        const last = members[members.length - 1]
+        setListDrop({ id: list.id, y: next ? next.y - 6 : last ? last.y + last.height + 6 : list.y + 44 })
+      } else setListDrop(null)
+    }
     lastScreenRef.current = (e.target as Element).closest('.floating-panel, .board-chrome') ? null : info.screen
     if (state.dragging?.type === 'connect') moveConnection(info, env, state)
     else if (state.dragging?.type === 'draw' || state.dragging?.type === 'marquee') {
@@ -157,6 +177,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     if (!panning) documentStore.endInteraction()
     if (containerRef.current?.hasPointerCapture(e.pointerId)) containerRef.current.releasePointerCapture(e.pointerId)
     setActiveStroke(null); setInteracting(false)
+    setListDrop(null)
   }
   const onDoubleClick = (e: React.MouseEvent) => {
     if (props.tool !== 'select') return
@@ -190,7 +211,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
       tools.select.onPointerMove?.({ world, screen: cameraStore.worldToScreen(world.x, world.y), shiftKey }, env, state)
     }
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTypingTarget(e) || cropId) return
+      if (isTypingTarget(e) || cropId || helpOpen || contextMenu) return
       if (e.key === 'Shift' && state.dragging?.type === 'marquee') { e.preventDefault(); updateSelectionModifier(true); return }
       if (e.key === 'Enter' && e.target instanceof HTMLButtonElement) return
       if (e.key === 'Escape') { cancel(); setSelection(new Set()); setEdgeId(null); setHelpOpen(false); props.setTool('select'); return }
@@ -199,6 +220,10 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
         return
       }
       const mod = e.metaKey || e.ctrlKey, key = e.key.toLowerCase()
+      if (mod && e.shiftKey && key === 'c') { e.preventDefault(); runBoardCommand('copy-svg'); return }
+      if (mod && key === '\\') { e.preventDefault(); props.onToggleUI(); return }
+      if (!mod && e.shiftKey && e.code === 'Digit1') { e.preventDefault(); runBoardCommand('fit'); return }
+      if (!mod && e.shiftKey && e.code === 'Digit0') { e.preventDefault(); runBoardCommand('reset-zoom'); return }
       if (mod && key === 'z') { e.preventDefault(); cancel(); if (e.shiftKey) documentStore.redo(); else documentStore.undo(); return }
       if (mod && key === 'y') { e.preventDefault(); documentStore.redo(); return }
       if (mod && key === 'd') { e.preventDefault(); if (selection.size) setSelection(duplicateNodes(selection)); return }
@@ -206,13 +231,14 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
       if (mod && key === 'g') {
         e.preventDefault()
         if (e.shiftKey) {
-          documentStore.transact(() => { const next = new Set<string>(); for (const id of selection) { const g = documentStore.getNode(id); if (g?.type === 'group') { g.memberIds?.forEach((member) => next.add(member)); documentStore.deleteNode(id) } else next.add(id) } setSelection(next) })
+          setSelection(ungroupNodes(selection))
         } else { const group = groupNodes(selection); if (group) setSelection(new Set([group.id])) }
         return
       }
       if (mod) return
       if (state.dragging) return
-      const map: Record<string, ToolId> = { v: 'select', '1': 'select', h: 'hand', '2': 'hand', b: 'box', '3': 'box', d: 'draw', '4': 'draw' }
+      if (key === 't') { e.preventDefault(); runBoardCommand('text'); return }
+      const map: Record<string, ToolId> = { v: 'select', '1': 'select', h: 'hand', '2': 'hand', b: 'box', '3': 'box', d: 'draw', '4': 'draw', l: 'list' }
       if (map[key]) { props.setTool(map[key]); return }
       if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); if (edgeId) { documentStore.deleteEdge(edgeId); setEdgeId(null) } else { deleteNodes(selection); setSelection(new Set()) } return }
       if (e.key === 'Enter' && selection.size === 1) {
@@ -237,7 +263,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     const onBlur = () => { restoreHand(); if (state.dragging) cancel() }
     window.addEventListener('keydown', onKeyDown); window.addEventListener('keyup', onKeyUp); window.addEventListener('blur', onBlur)
     return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); window.removeEventListener('blur', onBlur) }
-  }, [selection, edgeId, cropId, props.setTool, cancel, state])
+  }, [selection, edgeId, cropId, props.setTool, props.onToggleUI, helpOpen, contextMenu, cancel, state])
   const addFiles = useCallback((files: File[], origin: { x: number; y: number }) => {
     files.forEach((file, i) => {
       const reader = new FileReader()
@@ -252,6 +278,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
       if (!content) return
       writeClipboard(e.clipboardData, content)
       e.preventDefault()
+      if (e.type === 'cut') { deleteNodes(selection); setSelection(new Set()) }
     }
     const onPaste = (e: ClipboardEvent) => {
       if (e.defaultPrevented || isTypingTarget(e) || cropId || state.dragging) return
@@ -274,8 +301,8 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
         props.setTool('select')
       }
     }
-    window.addEventListener('copy', onCopy); window.addEventListener('paste', onPaste)
-    return () => { window.removeEventListener('copy', onCopy); window.removeEventListener('paste', onPaste) }
+    window.addEventListener('copy', onCopy); window.addEventListener('cut', onCopy); window.addEventListener('paste', onPaste)
+    return () => { window.removeEventListener('copy', onCopy); window.removeEventListener('cut', onCopy); window.removeEventListener('paste', onPaste) }
   }, [addFiles, selection, cropId, props.setTool, state])
   const fit = () => {
     const nodes = documentStore.getSnapshot().nodes ?? []
@@ -285,15 +312,95 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     const b = containerRef.current!, zoom = clampZoom(Math.min(1.5, (b.clientWidth - 160) / Math.max(1, w), (b.clientHeight - 180) / Math.max(1, h)))
     cameraStore.set({ zoom, x: (b.clientWidth - w * zoom) / 2 - x * zoom, y: (b.clientHeight - h * zoom) / 2 - y * zoom })
   }
-  return <div ref={containerRef} className={`board tool-${props.tool} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={() => { lastScreenRef.current = null }} onPointerUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={() => { if (state.dragging) cancel() }} onDoubleClick={onDoubleClick}
+  const executeCommand = (command: BoardCommand, origin = viewportCenterWorld()) => {
+    const fail = (error: unknown) => setError(error instanceof Error ? error.message : '操作失败，请重试')
+    if (state.dragging) cancel()
+    if (command === 'undo') documentStore.undo()
+    if (command === 'redo') documentStore.redo()
+    if (command === 'select-all') { setSelection(new Set((documentStore.getSnapshot().nodes ?? []).map((n) => n.id))); setEdgeId(null) }
+    if (command === 'delete') {
+      if (edgeId) { documentStore.deleteEdge(edgeId); setEdgeId(null) }
+      else { deleteNodes(selection); setSelection(new Set()) }
+    }
+    if (command === 'duplicate') setSelection(duplicateNodes(selection))
+    if (command === 'group') { const group = groupNodes(selection); if (group) setSelection(new Set([group.id])) }
+    if (command === 'ungroup') setSelection(ungroupNodes(selection))
+    if (command === 'fit') fit()
+    if (command === 'reset-zoom') {
+      const b = containerRef.current!, center = cameraStore.screenToWorld(b.clientWidth / 2, b.clientHeight / 2)
+      cameraStore.set({ zoom: 1, x: b.clientWidth / 2 - center.x, y: b.clientHeight / 2 - center.y })
+    }
+    if (command === 'toggle-ui') props.onToggleUI()
+    if (command === 'shortcuts') setHelpOpen(true)
+    if (command === 'text') {
+      documentStore.beginInteraction()
+      const node = createTextCard(origin)
+      draftCardRef.current = node.id
+      setSelection(new Set([node.id])); setEdgeId(null); setEditingId(node.id); props.setTool('select')
+    }
+    if (command === 'copy' || command === 'cut') {
+      const copied = new Set(selection)
+      void copyToSystemClipboard(copied).then((success) => {
+        if (success && command === 'cut') { deleteNodes(copied); setSelection(new Set()) }
+      }).catch(fail)
+    }
+    if (command === 'paste') {
+      void readSystemClipboard().then((data) => {
+        const content = readClipboard(data)
+        if (content) { setSelection(pasteSelection(content, origin)); setEdgeId(null); props.setTool('select'); return }
+        const files = Array.from(data.files).filter((file) => file.type.startsWith('image/'))
+        if (files.length) { setSelection(new Set()); addFiles(files, origin); return }
+        const text = data.getData('text/plain')
+        if (text.trim()) {
+          documentStore.transact(() => {
+            const node = IMAGE_URL_RE.test(text) ? createImageCard(origin, text) : createTextCard(origin)
+            if (node.type === 'text') documentStore.updateNode(node.id, { text })
+            setSelection(new Set([node.id]))
+          })
+          setEdgeId(null); props.setTool('select')
+        }
+      }).catch(fail)
+    }
+    if (['copy-svg', 'copy-png', 'export-svg', 'export-png'].includes(command)) {
+      const svg = selectionSVG(documentStore.getSnapshot(), selection)
+      if (command === 'copy-svg') void navigator.clipboard.write([new ClipboardItem({ 'text/plain': svg.then((value) => new Blob([value], { type: 'text/plain' })) })]).catch(fail)
+      else if (command === 'copy-png') void navigator.clipboard.write([new ClipboardItem({ 'image/png': svg.then(svgPNG) })]).catch(fail)
+      else void svg.then(async (value) => {
+        const png = command === 'export-png'
+        downloadBlob(png ? await svgPNG(value) : new Blob([value], { type: 'image/svg+xml' }), `${documentStore.getSnapshot().meta?.name || '白板'}.${png ? 'png' : 'svg'}`)
+      }).catch(fail)
+    }
+  }
+  useEffect(() => {
+    const handle = (event: Event) => executeCommand((event as CustomEvent<BoardCommand>).detail)
+    window.addEventListener('see-command', handle)
+    return () => window.removeEventListener('see-command', handle)
+  })
+  const onContextMenu = (e: React.MouseEvent) => {
+    if (isTypingTarget(e.nativeEvent) || (e.target as Element).closest('.floating-panel, .board-chrome')) return
+    e.preventDefault()
+    if (state.dragging) cancel()
+    const info = toPointerInfo(e), target = e.target as Element
+    const connectionId = target.closest<HTMLElement>('[data-edge-id], [data-edge-label-id]')?.dataset
+    const clickedEdge = connectionId?.edgeId ?? connectionId?.edgeLabelId
+    const node = clickedEdge ? null : (info.nodeId ? documentStore.getNode(info.nodeId) : hitTest(doc, info.world.x, info.world.y))
+    if (clickedEdge) { setEdgeId(clickedEdge); setSelection(new Set()) }
+    else { setEdgeId(null); if (node) { if (!selection.has(node.id)) setSelection(new Set([node.id])) } else setSelection(new Set()) }
+    setCropId(null); props.setTool('select')
+    setContextMenu({ x: e.clientX, y: e.clientY, world: info.world, nodeId: node?.id, edgeId: clickedEdge })
+  }
+  return <div ref={containerRef} className={`board tool-${props.tool} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={() => { lastScreenRef.current = null }} onPointerUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={() => { if (state.dragging) cancel() }} onDoubleClick={onDoubleClick} onContextMenu={onContextMenu}
     onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragOver(true) } }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false) }}
     onDrop={(e) => { e.preventDefault(); setDragOver(false); setSelection(new Set()); addFiles(Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/')), toPointerInfo(e).world) }}>
     <canvas ref={staticRef} className="canvas static" /><canvas ref={interactiveRef} className="canvas interactive" />
+    {listDrop && (() => { const list = doc.nodes?.find((n) => n.id === listDrop.id); return list && <><div className="list-drop-outline" style={{ left: list.x * camera.zoom + camera.x, top: list.y * camera.zoom + camera.y, width: list.width * camera.zoom, height: list.height * camera.zoom }} /><div className="list-insertion" style={{ left: (list.x + 12) * camera.zoom + camera.x, top: listDrop.y * camera.zoom + camera.y, width: (list.width - 24) * camera.zoom }} /></> })()}
     <ConnectionLayer doc={doc} camera={camera} preview={dragPreview} previewColor={defaultColors.connectionColor} selectedId={edgeId} onSelect={(id) => { setEdgeId(id); setSelection(new Set()) }} interactive={props.tool === 'select' && !interacting} />
     <CardLayer doc={doc} camera={camera} selection={selection} setSelection={setSelection} editingId={editingId} setEditingId={setEditingId} onTextEditDone={onTextEditDone} tool={props.tool} targetId={dragPreview?.targetId} cropId={cropId} onImageCrop={(node) => setCropId((id) => id === node.id ? null : node.id)} interacting={interacting} />
     {props.tool === 'draw' && <div className="draw-settings floating-panel board-chrome" onPointerDown={(e) => e.stopPropagation()}><StylePalette color={drawStyle.color} onChange={(color) => setDrawStyle((s) => ({ ...s, color }))} /><StrokeWidths value={drawStyle.strokeWidth} onChange={(strokeWidth) => setDrawStyle((s) => ({ ...s, strokeWidth }))} /></div>}
     <CanvasControls boardRef={containerRef} doc={doc} camera={camera} uiVisible={props.uiVisible} onToggleUI={props.onToggleUI} onFit={fit} />
-    {helpOpen && <div className="help-pop floating-panel board-chrome" onPointerDown={(e) => e.stopPropagation()}><div className="popover-heading"><span>操作帮助</span><IconButton icon={X} label="关闭帮助" onClick={() => setHelpOpen(false)} /></div><dl><dt>新建想法</dt><dd>双击空白 / 粘贴文字</dd><dt>连接 block</dt><dd>从右上圆点拖到另一个 block</dd><dt>延伸想法</dt><dd>从圆点拖到空白处</dd><dt>图片编辑</dt><dd>单击选择，双击裁剪</dd><dt>等比缩放</dt><dd>拖动右下角手柄，Shift 自由缩放</dd><dt>多选 / 分组</dt><dd>Shift 点选 / ⌘ Ctrl G</dd><dt>撤销 / 重做</dt><dd>⌘ Ctrl Z / ⇧ ⌘ Ctrl Z</dd><dt>平移 / 缩放</dt><dd>空格拖动 / ⌘ Ctrl 滚轮</dd></dl></div>}
+    {helpOpen && <ShortcutsDialog onClose={() => setHelpOpen(false)} />}
+    {contextMenu && <CanvasContextMenu target={contextMenu} selection={selection} setSelection={setSelection} onClose={() => setContextMenu(null)} onCommand={executeCommand} onEdit={setEditingId} onCrop={setCropId} onError={setError} />}
+    {error && <div className="board-toast floating-panel board-chrome" role="alert" onPointerDown={(e) => e.stopPropagation()}>{error}<IconButton icon={X} label="关闭提示" onClick={() => setError('')} /></div>}
     {dragOver && <div className="drop-overlay">松开以添加图片</div>}
     {cropNode && <ImageCrop key={cropNode.id} node={cropNode} camera={camera} onClose={() => setCropId(null)} />}
   </div>

@@ -103,6 +103,7 @@ function Minimap({ doc, camera, size }: { doc: CanvasFile; camera: Camera; size:
     })}
     {(doc.nodes ?? []).filter((node) => node.type !== 'group').map((node) => node.type === 'draw'
       ? <path key={node.id} transform={`translate(${node.x}, ${node.y})`} d={strokePath(node.points)} fill="none" stroke={resolveColor(node.color, '#71697a')} strokeWidth={node.strokeWidth ?? 3} strokeLinecap="round" />
+      : node.type === 'rectangle' ? <rect key={node.id} x={node.x} y={node.y} width={node.width} height={node.height} fill="none" stroke={resolveColor(node.color, '#76717f')} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
       : <rect key={node.id} x={node.x} y={node.y} width={node.width} height={node.height} rx={8} fill={resolveColor(node.color, '#b3c4cd')} />)}
     <rect className="minimap-viewport" x={viewport.x} y={viewport.y} width={viewport.width} height={viewport.height} rx={bounds.width * 0.025} vectorEffect="non-scaling-stroke" />
   </svg>

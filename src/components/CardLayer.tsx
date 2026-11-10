@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ArrowLineDown, ArrowLineUp, Copy, Crop, File, Link, PencilSimple, SquaresFour, TextT, Trash, SelectionSlash, SplitVertical } from './icons'
+import { ArrowLineDown, ArrowLineUp, Copy, Crop, File, Link, PencilSimple, SquaresFour, TextT, Trash, SelectionSlash, SplitVertical, List } from './icons'
 import type { Camera } from '../store/camera'
 import { documentStore } from '../store/document'
 import { resolveColor, strokePath } from '../render/renderer'
@@ -9,6 +9,7 @@ import { IconButton } from './IconButton'
 import { StylePalette } from './StylePalette'
 import { ResizeHandles } from './ResizeHandles'
 import { TextEditor } from './TextEditor'
+import { ArrangeMenu } from './ArrangeMenu'
 
 export function CardLayer(props: {
   doc: CanvasFile; camera: Camera; selection: Set<string>; setSelection: (s: Set<string>) => void
@@ -25,6 +26,13 @@ export function CardLayer(props: {
   return <div className={`card-layer ${active ? '' : 'pass-through'}`}>
     {(doc.nodes ?? []).map((node) => {
       const selected = selection.has(node.id), editing = props.editingId === node.id
+      if (node.type === 'rectangle') return <svg key={node.id} className={`rectangle-block ${selected ? 'selected' : ''}`} data-node-id={node.id} aria-label="矩形" style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
+        <g transform={`scale(${camera.zoom})`}>
+          {selected && <rect className="rectangle-selection" width={node.width} height={node.height} strokeWidth={2 + 6 / camera.zoom} />}
+          <rect className="rectangle-line" width={node.width} height={node.height} stroke={resolveColor(node.color, '#76717f')} strokeWidth={2} />
+          <rect className="rectangle-hit" width={node.width} height={node.height} strokeWidth={2 + 14 / camera.zoom} />
+        </g>
+      </svg>
       if (node.type === 'draw') return <svg key={node.id} className={`draw-block ${selected ? 'selected' : ''}`} data-node-id={node.id} aria-label="手绘笔迹" style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
         <g transform={`scale(${camera.zoom})`}>
           {selected && <path className="draw-selection" d={strokePath(node.points)} strokeWidth={(node.strokeWidth ?? 3) + 10 / camera.zoom} />}
@@ -32,8 +40,8 @@ export function CardLayer(props: {
           <path className="draw-hit" d={strokePath(node.points)} strokeWidth={(node.strokeWidth ?? 3) + 14 / camera.zoom} />
         </g>
       </svg>
-      if (node.type === 'group') return <div key={node.id} className={`group-label ${selected ? 'selected' : ''}`} data-node-id={node.id} style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y - 29, maxWidth: node.width * camera.zoom, color: resolveColor(node.color, '#8c8599') }} onDoubleClick={(e) => { e.stopPropagation(); props.setEditingId(node.id) }}>
-        <SquaresFour size={15} /><EditableText text={node.label || '分组'} editing={editing} className="group-name" onDone={(label) => { documentStore.updateNode(node.id, { label: label || '分组' }); props.setEditingId(null) }} />
+      if (node.type === 'group') return <div key={node.id} className={`group-label ${node.layout === 'list' ? 'list-label' : ''} ${selected ? 'selected' : ''}`} data-node-id={node.id} style={{ left: node.x * camera.zoom + camera.x + (node.layout === 'list' ? 12 * camera.zoom : 0), top: node.y * camera.zoom + camera.y + (node.layout === 'list' ? 8 * camera.zoom : -29), maxWidth: node.width * camera.zoom - (node.layout === 'list' ? 24 * camera.zoom : 0), color: resolveColor(node.color, '#8c8599') }} onDoubleClick={(e) => { e.stopPropagation(); props.setEditingId(node.id) }}>
+        {node.layout === 'list' ? <List size={15} /> : <SquaresFour size={15} />}<EditableText text={node.label || (node.layout === 'list' ? '列表' : '分组')} editing={editing} className="group-name" onDone={(label) => { documentStore.updateNode(node.id, { label }); props.setEditingId(null) }} />
       </div>
       return <div key={node.id} data-node-id={node.id} className={`block-wrapper ${selected ? 'selected' : ''} ${connected.has(node.id) ? 'connected' : ''} ${props.targetId === node.id ? 'connection-target' : ''}`} style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
         {node.type === 'image' ? <ImageCard node={node} camera={camera} selected={selected} editing={editing} draft={editing && captionDraft?.id === node.id ? captionDraft.text : node.text ?? ''} onInput={(text) => setCaptionDraft({ id: node.id, text })} onDone={(text) => { documentStore.updateNode(node.id, { text: text.trim() ? text : undefined }); setCaptionDraft(null); props.setEditingId(null) }} onCrop={() => props.onImageCrop(node)} />
@@ -64,6 +72,7 @@ function SelectionBar(props: Parameters<typeof CardLayer>[0] & { nodes: CanvasNo
   const recolor = (color?: CanvasNode['color']) => documentStore.transact(() => nodes.forEach((n) => documentStore.updateNode(n.id, { color })))
   return <div className="selection-bar floating-panel" style={{ left: `clamp(170px, ${((minX + maxX) / 2) * camera.zoom + camera.x}px, calc(100% - 170px))`, top: `clamp(12px, ${top}px, calc(100% - 105px))` }} onPointerDown={(e) => { e.stopPropagation(); if (captionEditing) e.preventDefault() }}>
     <div className="selection-actions">
+      {nodes.length > 1 && nodes.every((n) => n.type === 'text' || n.type === 'image') && <ArrangeMenu selection={props.selection} setSelection={props.setSelection} />}
       {one?.type === 'image' && <>
         <IconButton icon={Crop} label="裁剪图片" active={props.cropId === one.id} onClick={() => run(() => props.onImageCrop(one))} />
         <IconButton icon={TextT} label="编辑图片说明" active={captionEditing} onClick={() => { if (!captionEditing) { if (props.cropId === one.id) props.onImageCrop(one); props.setEditingId(one.id) } }} />
@@ -111,8 +120,7 @@ function TextCard({ node, camera, selected, editing, onDone, onEdit }: { node: E
     let active = true
     const measure = () => {
       const el = cardRef.current?.querySelector('.card-text')
-      const current = documentStore.getNode(node.id)
-      if (active && el && current && el.scrollHeight > current.height - 23) documentStore.updateTextLayout(node.id, Math.ceil(el.scrollHeight + 24))
+      if (active && el) documentStore.updateTextLayout(node.id, Math.ceil(el.scrollHeight + 24))
     }
     measure()
     void document.fonts.ready.then(measure)

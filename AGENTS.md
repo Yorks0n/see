@@ -9,6 +9,8 @@ https://github.com/tldraw/tldraw
 
 Avoid unnecessary secondary labels and descriptions. Let the layout do the explaining.
 
+快捷键统一维护在 `src/shortcuts.ts` 的 `SHORTCUTS` 列表中，菜单与快捷方式面板共用此数据源。每次新增、修改或移除快捷键时，必须同步更新该列表、对应事件处理及相关测试；区分画布快捷键与文字编辑快捷键，避免冲突。
+
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.

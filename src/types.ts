@@ -41,6 +41,8 @@ export interface ImageNode extends BaseNode {
 
 export interface GroupNode extends BaseNode {
   type: 'group'
+  layout?: 'list'
+  minHeight?: number
   label?: string
   background?: string
   backgroundStyle?: BackgroundStyle
@@ -58,7 +60,11 @@ export interface DrawNode extends BaseNode {
   strokeWidth?: number
 }
 
-export type CanvasNode = TextNode | FileNode | LinkNode | ImageNode | GroupNode | DrawNode
+export interface RectangleNode extends BaseNode {
+  type: 'rectangle'
+}
+
+export type CanvasNode = TextNode | FileNode | LinkNode | ImageNode | GroupNode | DrawNode | RectangleNode
 
 export interface CanvasEdge {
   id: string

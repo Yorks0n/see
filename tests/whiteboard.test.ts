@@ -5,11 +5,15 @@ import { CameraStore, cameraStore } from '../src/store/camera'
 import { DEFAULT_CONNECTION_COLOR, PreferencesStore, preferencesStore, THEME_STORAGE_KEY, COLORS_STORAGE_KEY } from '../src/store/preferences'
 import { cameraAtCenter, minimapBounds, minimapCamera, viewportRect, zoomAtCenter } from '../src/render/minimap'
 import { edgeGeometry, hitTest, PRESET_COLORS, strokePath } from '../src/render/renderer'
-import { createImageCard, createTextCard, duplicateNodes, expandSelection, finishConnection, moveConnection, splitImageCaption, startConnection, tools, ToolState, type ToolEnv, type PointerInfo } from '../src/tools/tools'
-import { importCanvasFile, loadLocal, saveLocal, saveRecovery } from '../src/persistence'
+import { arrangeNodes, createImageCard, createList, createTextCard, duplicateNodes, expandSelection, finishConnection, listFromSelection, moveConnection, splitImageCaption, startConnection, tools, ToolState, ungroupNodes, updateMembership, type ToolEnv, type PointerInfo } from '../src/tools/tools'
+import { arrangement, ARRANGE_GAP } from '../src/tools/layout'
+import { selectionSVG } from '../src/tools/export'
+import { SHORTCUTS } from '../src/shortcuts'
+import { deleteLocalFile, importCanvasFile, loadLocal, saveCanvas, saveLocal, saveRecovery, setActiveFile } from '../src/persistence'
+import { LIBRARY_KEY, LibraryStore } from '../src/store/library'
 import { cropImage, uncroppedBounds, type CropHandle } from '../src/tools/imageCrop'
 import { CLIPBOARD_MIME, copySelection, pasteSelection, readClipboard, writeClipboard } from '../src/tools/clipboard'
-import type { CanvasNode, GroupNode, ImageNode, TextNode } from '../src/types'
+import type { CanvasNode, GroupNode, ImageNode, RectangleNode, TextNode } from '../src/types'
 import { EditorState, TextSelection } from 'prosemirror-state'
 import type { EditorView } from 'prosemirror-view'
 import { liftListItem, splitListItem } from 'prosemirror-schema-list'
@@ -24,6 +28,79 @@ function environment(selection = new Set<string>()): ToolEnv {
   const env: ToolEnv = { selection, setSelection: (next) => { env.selection = next }, setDragPreview: () => {}, setMarquee: () => {}, setPaintTrail: () => {}, setEditingId: () => {}, setTool: () => {}, drawStyle: { color: '5', strokeWidth: 4 } }
   return env
 }
+
+test('rectangle tool creates click and reverse-drag shapes, moves independently, and supports cancel and undo', () => {
+  documentStore.load({ nodes: [card('inside', 120, 120)] })
+  const before = documentStore.toJSON(), env = environment(), state = new ToolState()
+  documentStore.beginInteraction()
+  tools.rectangle.onPointerDown!(pointer(300, 240), env, state)
+  tools.rectangle.onPointerMove!(pointer(100, 100), env, state)
+  tools.rectangle.onPointerUp!(pointer(100, 100), env, state)
+  documentStore.endInteraction()
+  const shape = documentStore.getNode([...env.selection][0])!
+  assert.equal(shape.type, 'rectangle')
+  assert.deepEqual([shape.x, shape.y, shape.width, shape.height], [100, 100, 200, 140])
+  assert.deepEqual([...expandSelection(env.selection)], [shape.id])
+  documentStore.beginInteraction()
+  tools.select.onPointerDown!(pointer(100, 150, shape.id), env, state)
+  tools.select.onPointerMove!(pointer(150, 180), env, state)
+  tools.select.onPointerUp!(pointer(150, 180), env, state)
+  documentStore.endInteraction()
+  assert.equal(documentStore.getNode(shape.id)!.x, 150)
+  assert.equal(documentStore.getNode('inside')!.x, 120)
+  documentStore.undo()
+  assert.equal(documentStore.getNode(shape.id)!.x, 100)
+  documentStore.undo()
+  assert.deepEqual(documentStore.toJSON(), before)
+  documentStore.redo()
+  assert.equal(documentStore.getNode(shape.id)!.width, 200)
+  documentStore.beginInteraction()
+  tools.rectangle.onPointerDown!(pointer(450, 100), env, state)
+  tools.rectangle.onPointerUp!(pointer(450, 100), env, state)
+  documentStore.endInteraction()
+  const clicked = documentStore.getNode([...env.selection][0])!
+  assert.deepEqual([clicked.width, clicked.height], [160, 100])
+  const saved = documentStore.toJSON()
+  documentStore.beginInteraction()
+  tools.rectangle.onPointerDown!(pointer(650, 100), env, state)
+  documentStore.cancelInteraction()
+  assert.deepEqual(documentStore.toJSON(), saved)
+})
+
+test('rectangle selection hits its border and passes through the transparent interior', () => {
+  const shape: RectangleNode = { id: 'rectangle', type: 'rectangle', x: 100, y: 100, width: 240, height: 180 }
+  const doc = { nodes: [card('inside', 150, 150), shape] }
+  assert.equal(hitTest(doc, 100, 150)!.id, shape.id)
+  assert.equal(hitTest(doc, 345, 200)!.id, shape.id)
+  assert.equal(hitTest(doc, 180, 180)!.id, 'inside')
+  assert.equal(hitTest(doc, 290, 240), null)
+  documentStore.load({ nodes: [shape] })
+  const env = environment(), state = new ToolState()
+  tools.select.onPointerDown!(pointer(150, 150), env, state)
+  tools.select.onPointerMove!(pointer(250, 200), env, state)
+  assert.equal(env.selection.size, 0)
+  tools.select.onPointerUp!(pointer(350, 200), env, state)
+  assert.deepEqual([...env.selection], [shape.id])
+})
+
+test('rectangles survive restoration, clipboard and SVG export with no fill or connection arrowheads', async () => {
+  const shape: RectangleNode = { id: 'rectangle', type: 'rectangle', x: -100, y: 50, width: 240, height: 180, color: '#123456' }
+  const doc = restoreCanvas({ nodes: [shape, card('text', 300, 200)], edges: [{ id: 'direction', fromNode: shape.id, toNode: 'text', toEnd: 'arrow' }] })
+  assert.deepEqual(doc.nodes![0], shape)
+  documentStore.load(doc)
+  const clipboard = copySelection(new Set([shape.id]))!
+  const data = new Map<string, string>()
+  const transfer = { getData: (type: string) => data.get(type) ?? '', setData: (type: string, value: string) => data.set(type, value) } as DataTransfer
+  writeClipboard(transfer, clipboard)
+  const restored = readClipboard(transfer)!
+  assert.equal(restored.nodes[0].type, 'rectangle')
+  const pasted = pasteSelection(restored, { x: 600, y: 100 })
+  assert.equal(documentStore.getNode([...pasted][0])!.type, 'rectangle')
+  const svg = await selectionSVG(doc)
+  assert.match(svg, /<rect x="-100" y="50" width="240" height="180" fill="none" stroke="#123456" stroke-width="2"/)
+  assert.doesNotMatch(svg, /marker|arrow/)
+  assert.equal(doc.edges![0].toEnd, 'arrow')
+})
 
 test('text blocks render three heading levels and preserve ordinary text and blank lines', () => {
   const doc = textDocument('# 大标题\r\n## 二级标题\n### 三级标题\n正文\n\n#没有空格\n#### 四级原文')
@@ -826,4 +903,373 @@ test('connection label drag offsets survive export, restoration, undo, and inval
   assert.deepEqual(store.getEdge('edge')!.labelOffset, { x: 120, y: -80 })
   store.updateEdge('edge', { labelOffset: { x: NaN, y: Infinity } })
   assert.equal(restoreCanvas(store.toJSON()).edges![0].labelOffset, undefined)
+})
+
+test('list creation preserves card content and image ratio, assigns one parent, and undoes together', () => {
+  const photo: ImageNode = { id: 'photo', type: 'image', x: 400, y: 220, width: 200, height: 100, url: 'data:image/png;base64,AA' }
+  documentStore.load({ nodes: [card('a', 100, 100), photo, { ...frame(['a']), width: 800, height: 500 }] })
+  const before = documentStore.toJSON()
+  const list = listFromSelection(new Set(['photo', 'a']))!
+  const restored = documentStore.getNode(list.id) as GroupNode
+  assert.equal(restored.layout, 'list')
+  assert.deepEqual(restored.memberIds, ['a', 'photo'])
+  assert.deepEqual((documentStore.getNode('group') as GroupNode).memberIds, [])
+  const a = documentStore.getNode('a')!, image = documentStore.getNode('photo')!
+  assert.equal(a.x, image.x)
+  assert.equal(a.width, image.width)
+  assert.equal(image.y, a.y + a.height + 12)
+  assert.equal(image.width / image.height, 2)
+  assert.equal((a as TextNode).text, 'a')
+  assert.ok(restored.height >= image.y + image.height - restored.y + 16)
+  assert.equal(restoreCanvas(documentStore.toJSON()).nodes!.find((n) => n.id === list.id)!.type, 'group')
+  documentStore.undo()
+  assert.deepEqual(documentStore.toJSON(), before)
+  documentStore.redo()
+  assert.equal((documentStore.getNode(list.id) as GroupNode).layout, 'list')
+})
+
+test('draw-list gesture creates a list around enclosed cards and rejects tiny gestures', () => {
+  documentStore.load({ nodes: [card('a', 100, 100), card('outside', 700, 300)] })
+  const env = environment(), state = new ToolState()
+  documentStore.beginInteraction()
+  tools.list.onPointerDown!(pointer(60, 60), env, state)
+  tools.list.onPointerMove!(pointer(320, 240), env, state)
+  tools.list.onPointerUp!(pointer(320, 240), env, state)
+  documentStore.endInteraction()
+  const list = documentStore.getNode([...env.selection][0]) as GroupNode
+  assert.equal(list.layout, 'list')
+  assert.deepEqual(list.memberIds, ['a'])
+  assert.equal(state.dragging, null)
+  documentStore.undo()
+  assert.equal(documentStore.getNode(list.id), undefined)
+  tools.list.onPointerDown!(pointer(0, 0), env, state)
+  tools.list.onPointerMove!(pointer(5, 5), env, state)
+  tools.list.onPointerUp!(pointer(5, 5), env, state)
+  assert.equal(documentStore.getSnapshot().nodes!.length, 2)
+})
+
+test('dropping into lists uses the pointer, supports reordering and drag-out, and preserves undo', () => {
+  documentStore.load({ nodes: [card('a', 400, 40), card('b', 400, 180)] })
+  const list = createList({ x: 0, y: 0, width: 200, height: 200 })
+  const move = (id: string, x: number, y: number) => {
+    const n = documentStore.getNode(id)!, env = environment(new Set([id])), state = new ToolState()
+    documentStore.beginInteraction()
+    tools.select.onPointerDown!(pointer(n.x + 10, n.y + 10, id), env, state)
+    tools.select.onPointerMove!(pointer(x, y), env, state)
+    tools.select.onPointerUp!(pointer(x, y), env, state)
+    documentStore.endInteraction()
+  }
+  move('a', 5, 55) // Only the pointer, not the full card, needs to be inside.
+  assert.deepEqual((documentStore.getNode(list.id) as GroupNode).memberIds, ['a'])
+  move('b', 50, 120)
+  assert.deepEqual((documentStore.getNode(list.id) as GroupNode).memberIds, ['a', 'b'])
+  move('b', 50, 45)
+  assert.deepEqual((documentStore.getNode(list.id) as GroupNode).memberIds, ['b', 'a'])
+  const before = documentStore.toJSON()
+  move('b', 600, 500)
+  assert.deepEqual((documentStore.getNode(list.id) as GroupNode).memberIds, ['a'])
+  documentStore.undo()
+  assert.deepEqual(documentStore.toJSON(), before)
+  move('b', 600, 500)
+  assert.equal(documentStore.getNode('a')!.y, 44)
+})
+
+test('moving a list keeps all members and cancellation restores all geometry', () => {
+  documentStore.load({ nodes: [card('a', 40, 100), card('b', 40, 200)] })
+  const list = listFromSelection(new Set(['a', 'b']))!, before = documentStore.toJSON()
+  const env = environment(new Set([list.id])), state = new ToolState()
+  documentStore.beginInteraction()
+  tools.select.onPointerDown!(pointer(list.x + 5, list.y + 5, list.id), env, state)
+  tools.select.onPointerMove!(pointer(list.x + 305, list.y + 205), env, state)
+  tools.select.onPointerUp!(pointer(list.x + 305, list.y + 205), env, state)
+  documentStore.endInteraction()
+  assert.deepEqual((documentStore.getNode(list.id) as GroupNode).memberIds, ['a', 'b'])
+  assert.equal(documentStore.getNode('a')!.x, before.nodes!.find((n) => n.id === 'a')!.x + 300)
+  documentStore.undo()
+  assert.deepEqual(documentStore.toJSON(), before)
+  documentStore.beginInteraction()
+  tools.select.onPointerDown!(pointer(list.x + 5, list.y + 5, list.id), env, state)
+  tools.select.onPointerMove!(pointer(list.x + 405, list.y + 105), env, state)
+  documentStore.cancelInteraction()
+  state.dragging = null
+  assert.deepEqual(documentStore.toJSON(), before)
+})
+
+test('list reflows after text growth, image decode and deletion without extra image undo steps', () => {
+  documentStore.load({ nodes: [card('a', 40, 100), { id: 'photo', type: 'image', x: 40, y: 200, width: 280, height: 180, url: '' }] })
+  const list = listFromSelection(new Set(['a', 'photo']))!
+  documentStore.updateTextLayout('a', 160)
+  const a = documentStore.getNode('a')!
+  assert.equal(documentStore.getNode('photo')!.y, a.y + 160 + 12)
+  documentStore.initializeImage('photo', 1000, 500)
+  const image = documentStore.getNode('photo')!
+  assert.equal(image.width / image.height, 2)
+  const height = documentStore.getNode(list.id)!.height
+  documentStore.deleteNode('a')
+  assert.equal(documentStore.getNode('photo')!.y, list.y + 44)
+  assert.ok(documentStore.getNode(list.id)!.height < height)
+  documentStore.undo()
+  assert.equal(documentStore.getNode('photo')!.y, a.y + 160 + 12)
+})
+
+test('list duplicate and clipboard remap members and retain layout, dissolution keeps cards', () => {
+  documentStore.load({ nodes: [card('a', 20, 100), card('b', 20, 200)] })
+  const list = listFromSelection(new Set(['a', 'b']))!
+  const copied = copySelection(new Set([list.id]))!
+  const duplicate = documentStore.getNode([...duplicateNodes(new Set([list.id]))][0]) as GroupNode
+  assert.equal(duplicate.layout, 'list')
+  assert.ok(duplicate.memberIds!.every((id) => !['a', 'b'].includes(id)))
+  const pasted = documentStore.getNode([...pasteSelection(copied, { x: 800, y: 200 })][0]) as GroupNode
+  assert.equal(pasted.layout, 'list')
+  const members = [...pasted.memberIds!]
+  const next = ungroupNodes(new Set([pasted.id]))
+  assert.deepEqual([...next], members)
+  assert.equal(documentStore.getNode(pasted.id), undefined)
+  assert.ok(members.every((id) => documentStore.getNode(id)))
+  documentStore.undo()
+  assert.equal((documentStore.getNode(pasted.id) as GroupNode).layout, 'list')
+})
+
+test('quick arrange uses a fixed gap with top alignment in rows and left alignment in columns', () => {
+  const nodes = [card('a', 20, 60), { ...card('b', 300, 180), width: 160, height: 100 }, card('c', 600, 400)]
+  for (const mode of ['horizontal', 'vertical'] as const) {
+    const result = arrangement(nodes, mode)
+    const axis = mode === 'horizontal' ? 'x' : 'y', cross = mode === 'horizontal' ? 'y' : 'x'
+    const dimension = mode === 'horizontal' ? 'width' : 'height'
+    nodes.forEach((node, index) => {
+      assert.equal(result.get(node.id)![cross], mode === 'horizontal' ? 60 : 20)
+      if (index) assert.equal(result.get(node.id)![axis]! - result.get(nodes[index - 1].id)![axis]! - nodes[index - 1][dimension], ARRANGE_GAP)
+    })
+  }
+  const overlapping = arrangement([card('b', 21, 22), card('a', 20, 20)], 'horizontal')
+  assert.equal(overlapping.get('b')!.x, 120 + ARRANGE_GAP)
+  assert.equal(arrangement([nodes[0]], 'vertical').size, 0)
+  documentStore.load({ nodes })
+  const before = documentStore.toJSON()
+  arrangeNodes(new Set(['a', 'b', 'c']), 'vertical')
+  assert.equal(documentStore.getNode('a')!.x, documentStore.getNode('b')!.x)
+  documentStore.undo()
+  assert.deepEqual(documentStore.toJSON(), before)
+})
+
+test('list resize reflows its members during the drag, preserves manual height and supports cancel and undo', () => {
+  const store = new DocumentStore()
+  store.load({ nodes: [
+    { ...frame(['a', 'photo']), layout: 'list' },
+    card('a'),
+    { id: 'photo', type: 'image', x: 0, y: 0, width: 200, height: 100, url: 'data:image/png;base64,AA' },
+  ] })
+  const before = store.toJSON()
+  store.beginInteraction()
+  store.resizeList('group', 480, 600)
+  assert.equal(store.getNode('group')!.width, 480)
+  assert.equal(store.getNode('group')!.height, 600)
+  assert.equal(store.getNode('a')!.width, 448)
+  assert.equal(store.getNode('photo')!.width, 448)
+  assert.equal(store.getNode('photo')!.height, 224)
+  assert.equal(store.getNode('photo')!.y, 44 + 60 + 12)
+  store.endInteraction()
+  const resized = store.toJSON()
+  store.undo()
+  assert.deepEqual(store.toJSON(), before)
+  store.redo()
+  assert.deepEqual(store.toJSON(), resized)
+  store.beginInteraction()
+  store.resizeList('group', 180, 180)
+  store.cancelInteraction()
+  assert.deepEqual(store.toJSON(), resized)
+  store.load(resized)
+  assert.equal(store.getNode('group')!.height, 600)
+  store.resizeList('group', 1, 1)
+  assert.equal(store.getNode('group')!.width, 160)
+  assert.ok(store.getNode('group')!.height >= store.getNode('photo')!.y + store.getNode('photo')!.height + 16)
+  store.updateTextLayout('a', 180)
+  assert.equal(store.getNode('photo')!.y, 44 + 180 + 12)
+  store.updateTextLayout('a', 48)
+  assert.equal(store.getNode('a')!.height, 48)
+  assert.equal(store.getNode('photo')!.y, 44 + 48 + 12)
+})
+
+test('fitting text inside a list preserves the original card height when undoing list creation', () => {
+  const store = new DocumentStore()
+  store.load({ nodes: [{ ...card('a'), width: 128 }] })
+  store.addNode({ ...frame(['a']), layout: 'list', width: 160 })
+  store.updateTextLayout('a', 48)
+  assert.equal(store.getNode('a')!.height, 48)
+  store.undo()
+  assert.equal(store.getNode('a')!.height, 60)
+  assert.equal(store.getNode('group'), undefined)
+})
+
+test('moving cards between two lists removes old membership and only inserts once', () => {
+  documentStore.load({ nodes: [card('a', 400, 200)] })
+  const first = listFromSelection(new Set(['a']))!
+  const second = createList({ x: 0, y: 0, width: 220, height: 180 })
+  documentStore.transact(() => {
+    documentStore.updateNode('a', { x: 16, y: 44 })
+    updateMembership(['a'], { x: 30, y: 55 })
+  })
+  assert.deepEqual((documentStore.getNode(first.id) as GroupNode).memberIds, [])
+  assert.deepEqual((documentStore.getNode(second.id) as GroupNode).memberIds, ['a'])
+})
+
+test('renaming preserves metadata, normalizes whitespace and is undoable', () => {
+  const store = new DocumentStore()
+  store.load({ nodes: [], meta: { name: '旧名字', camera: { x: 5, y: 10, zoom: 1 } } })
+  store.rename('  灵感收集  ')
+  assert.equal(store.getSnapshot().meta!.name, '灵感收集')
+  assert.equal(store.getSnapshot().meta!.camera!.x, 5)
+  store.undo()
+  assert.equal(store.getSnapshot().meta!.name, '旧名字')
+  store.rename('  ')
+  assert.equal(store.getSnapshot().meta!.name, '未命名画布')
+})
+
+test('SVG export embeds cropped images, escapes text and includes only selected internal connections', async () => {
+  const a = { ...card('a', -200, -100), text: '<hello> & "world"' }
+  const photo: ImageNode = { id: 'photo', type: 'image', x: 10, y: 20, width: 100, height: 60, url: 'data:image/png;base64,AA', crop: { x: 0.25, y: 0, width: 0.5, height: 1 } }
+  const doc = { nodes: [a, photo, card('outside', 600, 600)], edges: [{ id: 'internal', fromNode: 'a', toNode: 'photo' }, { id: 'external', fromNode: 'photo', toNode: 'outside' }] }
+  documentStore.load(doc)
+  const svg = await selectionSVG(doc, new Set(['a', 'photo']))
+  assert.match(svg, /viewBox="-224 -140/)
+  assert.match(svg, /&lt;hello&gt;/)
+  assert.match(svg, /data:image\/png;base64,AA/)
+  assert.match(svg, /x="-50" y="0" width="200"/)
+  assert.equal((svg.match(/stroke-width="4"/g) ?? []).length, 1)
+  assert.doesNotMatch(svg, /outside/)
+  await assert.rejects(selectionSVG({ nodes: [] }), /没有可导出/)
+})
+
+test('shortcut registry has unique entries for list, SVG copy and file and view commands', () => {
+  assert.equal(new Set(SHORTCUTS.map((s) => s.id)).size, SHORTCUTS.length)
+  for (const id of ['list', 'copy-svg', 'save', 'open', 'media', 'fit', 'reset-zoom', 'toggle-ui', 'cut']) assert.ok(SHORTCUTS.some((s) => s.id === id))
+  assert.equal(SHORTCUTS.find((s) => s.id === 'copy-svg')!.keys, 'Mod + Shift + C')
+})
+
+test('pending saves retain the source file and snapshot when another file becomes active', async () => {
+  const storage = new Map<string, string>(), previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+    removeItem: (key: string) => storage.delete(key),
+  } })
+  try {
+    setActiveFile('save-source')
+    documentStore.load({ nodes: [card('source')], meta: { name: '源文件' } })
+    const saving = saveLocal()
+    setActiveFile('save-destination')
+    documentStore.load({ nodes: [card('destination')], meta: { name: '目标文件' } })
+    await saving
+    await saveLocal()
+    assert.equal((await loadLocal('save-source'))!.meta!.name, '源文件')
+    assert.equal((await loadLocal('save-source'))!.nodes![0].id, 'source')
+    assert.equal((await loadLocal('save-destination'))!.nodes![0].id, 'destination')
+  } finally {
+    if (previous === undefined) delete (globalThis as any).localStorage
+    else Object.defineProperty(globalThis, 'localStorage', previous)
+  }
+})
+
+test('file library migrates content, manages independent boards, and flattens legacy projects without losing files', async () => {
+  const storage = new Map<string, string>(), previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const subscribe = documentStore.subscribe, subscriptions: (() => void)[] = []
+  documentStore.subscribe = (listener) => { const unsubscribe = subscribe(listener); subscriptions.push(unsubscribe); return unsubscribe }
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+    removeItem: (key: string) => storage.delete(key),
+  } })
+  try {
+    documentStore.load({ nodes: [card('legacy')], meta: { name: '原有白板' } })
+    await saveLocal()
+    const library = new LibraryStore()
+    await Promise.all([library.initialize(), library.initialize()])
+    const initial = library.getSnapshot(), first = initial.files[0]
+    assert.equal(initial.files.length, 1)
+    assert.equal(first.name, '原有白板')
+    assert.equal(documentStore.getNode('legacy')!.type, 'text')
+    const second = (await library.createFile('第二份白板'))!
+    assert.equal(documentStore.getSnapshot().nodes!.length, 0)
+    documentStore.addNode(card('second-content'))
+    documentStore.rename('修改后的白板')
+    cameraStore.set({ x: 120, y: -40, zoom: 0.7 })
+    assert.equal(library.getSnapshot().files.find((file) => file.id === second.id)!.name, '修改后的白板')
+    await library.switchFile(first.id)
+    assert.ok(documentStore.getNode('legacy'))
+    assert.equal(documentStore.getNode('second-content'), undefined)
+    await library.switchFile(second.id)
+    assert.ok(documentStore.getNode('second-content'))
+    assert.deepEqual(cameraStore.getSnapshot(), { x: 120, y: -40, zoom: 0.7 })
+    const imported = (await library.createFile('导入白板', { nodes: [card('imported')], meta: { camera: { x: 40, y: 50, zoom: 1.2 } } }))!
+    assert.equal(documentStore.getSnapshot().meta!.name, '导入白板')
+    assert.ok(documentStore.getNode('imported'))
+    assert.deepEqual(cameraStore.getSnapshot(), { x: 40, y: 50, zoom: 1.2 })
+    assert.ok(library.getSnapshot().files.some((file) => file.id === imported.id))
+    await library.switchFile(first.id)
+    assert.ok(documentStore.getNode('legacy'))
+    const activeBefore = documentStore.toJSON(), cameraBefore = cameraStore.getSnapshot()
+    await library.renameFile(second.id, '后台重命名')
+    assert.deepEqual(documentStore.toJSON(), activeBefore)
+    assert.deepEqual(cameraStore.getSnapshot(), cameraBefore)
+    assert.equal((await loadLocal(second.id))!.meta!.name, '后台重命名')
+    const duplicate = (await library.duplicateFile(second.id))!
+    assert.equal(documentStore.getSnapshot().meta!.name, '后台重命名 副本')
+    assert.ok(documentStore.getNode('second-content'))
+    assert.deepEqual(cameraStore.getSnapshot(), { x: 120, y: -40, zoom: 0.7 })
+    documentStore.updateNode('second-content', { text: '只修改副本' })
+    await library.switchFile(second.id)
+    assert.equal((documentStore.getNode('second-content') as TextNode).text, 'second-content')
+    library.togglePin(imported.id)
+    assert.equal(library.getSnapshot().files[0].id, imported.id)
+    assert.equal(JSON.parse(storage.get(LIBRARY_KEY)!).files[0].pinned, true)
+    library.togglePin(imported.id)
+    assert.equal(library.getSnapshot().files[0].pinned, false)
+    await library.deleteFile(duplicate.id)
+    assert.equal(library.getSnapshot().activeFileId, second.id)
+    assert.equal(await loadLocal(duplicate.id), null)
+    await library.deleteFile(second.id)
+    assert.equal(library.getSnapshot().activeFileId, imported.id)
+    assert.ok(documentStore.getNode('imported'))
+    assert.equal(await loadLocal(second.id), null)
+    subscriptions.splice(0).forEach((unsubscribe) => unsubscribe())
+    const reopened = new LibraryStore()
+    await reopened.initialize()
+    assert.equal(reopened.getSnapshot().activeFileId, imported.id)
+    assert.equal(documentStore.getSnapshot().meta!.name, '导入白板')
+    await reopened.deleteFile(first.id)
+    await reopened.deleteFile(imported.id)
+    const fresh = reopened.getSnapshot().files[0]
+    assert.equal(reopened.getSnapshot().files.length, 1)
+    assert.notEqual(fresh.id, imported.id)
+    assert.equal(documentStore.getSnapshot().nodes!.length, 0)
+    assert.ok(await loadLocal(fresh.id))
+    subscriptions.splice(0).forEach((unsubscribe) => unsubscribe())
+    await saveCanvas('legacy-one', { nodes: [card('project-one-card')], meta: { name: '项目一白板' } })
+    await saveCanvas('legacy-two', { nodes: [card('project-two-card')], meta: { name: '项目二白板' } })
+    storage.set(LIBRARY_KEY, JSON.stringify({
+      projects: [{ id: 'p1', name: '项目一' }, { id: 'p2', name: '项目二' }],
+      files: [{ id: 'legacy-one', name: '项目一白板', projectId: 'p1' }, { id: 'legacy-two', name: '项目二白板', projectId: 'p2', pinned: true }],
+      activeFileId: 'legacy-one',
+    }))
+    const migrated = new LibraryStore()
+    await migrated.initialize()
+    assert.deepEqual(migrated.getSnapshot().files.map((file) => file.id), ['legacy-two', 'legacy-one'])
+    assert.equal(JSON.parse(storage.get(LIBRARY_KEY)!).projects, undefined)
+    assert.ok(migrated.getSnapshot().files.every((file) => !('projectId' in file)))
+    await migrated.switchFile('legacy-two')
+    assert.ok(documentStore.getNode('project-two-card'))
+    await migrated.switchFile('legacy-one')
+    assert.ok(documentStore.getNode('project-one-card'))
+    const pendingSave = saveLocal()
+    await deleteLocalFile('legacy-one')
+    await pendingSave
+    await saveLocal()
+    saveRecovery()
+    assert.equal(await loadLocal('legacy-one'), null)
+  } finally {
+    subscriptions.forEach((unsubscribe) => unsubscribe())
+    documentStore.subscribe = subscribe
+    if (previous === undefined) delete (globalThis as any).localStorage
+    else Object.defineProperty(globalThis, 'localStorage', previous)
+  }
 })

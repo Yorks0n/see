@@ -41,7 +41,6 @@ export function ConnectionLayer({ doc, camera, preview, previewColor, selectedId
   const selectedColor = resolveColor(selected?.color, '#609fbb')
   return <>
     <svg ref={layerRef} className="connections-layer" aria-label="Block 连接">
-      <defs><marker id="connection-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" /></marker></defs>
       <g transform={`translate(${camera.x}, ${camera.y}) scale(${camera.zoom})`}>
         {(doc.edges ?? []).map((edge) => {
           const path = edgeGeometry(edge, byId)
@@ -49,7 +48,7 @@ export function ConnectionLayer({ doc, camera, preview, previewColor, selectedId
           const color = resolveColor(edge.color, '#609fbb')
           return <g key={edge.id} className={selectedId === edge.id ? 'connection selected' : 'connection'}>
             <path className="connection-glow" d={path.path} stroke={color} strokeWidth={LINE_WIDTH + 8 / camera.zoom} />
-            <path className="connection-line" d={path.path} stroke={color} strokeWidth={LINE_WIDTH} markerEnd={edge.toEnd === 'arrow' ? 'url(#connection-arrow)' : undefined} markerStart={edge.fromEnd === 'arrow' ? 'url(#connection-arrow)' : undefined} />
+            <path className="connection-line" d={path.path} stroke={color} strokeWidth={LINE_WIDTH} />
             {edge.toEnd === 'arrow' && <circle className="connection-direction" r={4.5} fill={color} pointerEvents="none"><animateMotion dur="3s" repeatCount="indefinite" path={path.path} /></circle>}
             <path className="connection-hit" data-edge-id={edge.id} d={path.path} strokeWidth={18 / camera.zoom} style={{ pointerEvents: interactive ? 'stroke' : 'none' }} onPointerDown={(e) => { e.stopPropagation(); onSelect(edge.id) }} onClick={(e) => e.stopPropagation()}><title>{edge.label || '连接 · 点击编辑'}</title></path>
           </g>

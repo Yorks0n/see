@@ -161,6 +161,11 @@ function segmentDistance(p: DrawPoint, a: DrawPoint, b: DrawPoint) {
 export function hitTest(doc: CanvasFile, wx: number, wy: number, tolerance = 7): CanvasNode | null {
   const nodes = doc.nodes ?? []
   const test = (n: CanvasNode) => {
+    if (n.type === 'rectangle') {
+      const radius = tolerance + 1
+      return wx >= n.x - radius && wx <= n.x + n.width + radius && wy >= n.y - radius && wy <= n.y + n.height + radius
+        && (wx <= n.x + radius || wx >= n.x + n.width - radius || wy <= n.y + radius || wy >= n.y + n.height - radius)
+    }
     if (n.type === 'draw') {
       const p = { x: wx - n.x, y: wy - n.y }
       const radius = tolerance + (n.strokeWidth ?? 3) / 2

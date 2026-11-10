@@ -2,9 +2,10 @@ import { cameraStore } from '../store/camera'
 import { documentStore, uid } from '../store/document'
 import { preferencesStore } from '../store/preferences'
 import { hitTest } from '../render/renderer'
-import type { CanvasColor, CanvasNode, DrawNode, DrawPoint, GroupNode, ImageNode, TextNode } from '../types'
+import type { CanvasColor, CanvasNode, DrawNode, DrawPoint, GroupNode, ImageNode, RectangleNode, TextNode } from '../types'
+import { arrangement, type ArrangeMode } from './layout'
 
-export type ToolId = 'select' | 'box' | 'draw' | 'hand'
+export type ToolId = 'select' | 'box' | 'draw' | 'hand' | 'list' | 'rectangle'
 export interface DrawStyle { color?: CanvasColor; strokeWidth: number }
 export interface ToolEnv {
   selection: Set<string>
@@ -23,7 +24,7 @@ export interface PointerInfo {
   nodeId?: string
 }
 interface DragState {
-  type: 'pan' | 'move' | 'marquee' | 'connect' | 'box' | 'draw'
+  type: 'pan' | 'move' | 'marquee' | 'connect' | 'box' | 'draw' | 'rectangle'
   startWorld: { x: number; y: number }
   startScreen: { x: number; y: number }
   originCamera?: { x: number; y: number }
@@ -113,6 +114,40 @@ export function groupNodes(ids: Set<string>): GroupNode | null {
   documentStore.transact(() => { documentStore.addNode(group); updateMembership([group.id]) })
   return group
 }
+export function createList(rect: { x: number; y: number; width: number; height: number }, ids = new Set<string>()) {
+  const members = (documentStore.getSnapshot().nodes ?? []).filter((n) => ids.has(n.id) && (n.type === 'text' || n.type === 'image')).sort((a, b) => a.y - b.y || a.x - b.x)
+  const list: GroupNode = { id: uid(), type: 'group', ...rect, width: Math.max(200, rect.width), minHeight: Math.max(140, rect.height), layout: 'list', label: '列表', memberIds: members.map((n) => n.id) }
+  documentStore.transact(() => {
+    // A card belongs to a single container.
+    for (const group of documentStore.getSnapshot().nodes ?? []) {
+      if (group.type === 'group' && group.memberIds?.some((id) => ids.has(id))) documentStore.updateNode(group.id, { memberIds: group.memberIds.filter((id) => !ids.has(id)) })
+    }
+    documentStore.addNode(list)
+  })
+  return list
+}
+export function listFromSelection(ids: Set<string>) {
+  const nodes = (documentStore.getSnapshot().nodes ?? []).filter((n) => ids.has(n.id) && (n.type === 'text' || n.type === 'image'))
+  if (!nodes.length) return null
+  return createList({ x: Math.min(...nodes.map((n) => n.x)) - 16, y: Math.min(...nodes.map((n) => n.y)) - 44, width: Math.max(...nodes.map((n) => n.width)) + 32, height: 140 }, ids)
+}
+export function ungroupNodes(ids: Set<string>) {
+  const next = new Set<string>()
+  documentStore.transact(() => {
+    for (const id of ids) {
+      const node = documentStore.getNode(id)
+      if (node?.type === 'group') { node.memberIds?.forEach((member) => next.add(member)); documentStore.deleteNode(id) }
+      else next.add(id)
+    }
+  })
+  return next
+}
+export function arrangeNodes(ids: Set<string>, mode: ArrangeMode) {
+  documentStore.transact(() => {
+    documentStore.updateNodes(arrangement((documentStore.getSnapshot().nodes ?? []).filter((n) => ids.has(n.id) && (n.type === 'text' || n.type === 'image')), mode))
+    updateMembership(ids)
+  })
+}
 export function startConnection(fromId: string, info: PointerInfo, env: ToolEnv, state: ToolState) {
   state.dragging = { type: 'connect', startWorld: info.world, startScreen: info.screen, fromId, moved: false }
   env.setSelection(new Set([fromId]))
@@ -156,16 +191,25 @@ export function splitImageCaption(id: string, text: string): TextNode | null {
   return documentStore.getNode(card!.id) as TextNode
 }
 
-export function updateMembership(ids: Iterable<string>) {
+export function updateMembership(ids: Iterable<string>, drop?: DrawPoint) {
   const nodes = documentStore.getSnapshot().nodes ?? []
+  const movedIds = new Set(ids)
   const groups = nodes.filter((n): n is GroupNode => n.type === 'group')
   const patches = new Map<string, Partial<CanvasNode>>()
   const memberships = new Map(groups.map((g) => [g.id, [...(g.memberIds ?? nodes.filter((n) => n.id !== g.id && contains(g, n)).map((n) => n.id))]]))
-  for (const id of ids) {
+  for (const id of movedIds) {
     const n = documentStore.getNode(id)
     if (!n) continue
     const descendants = expandSelection(new Set([id]))
-    const parent = groups.filter((g) => !descendants.has(g.id) && contains(g, n)).sort((a, b) =>
+    // Moving a container keeps its descendants attached.
+    if (groups.some((g) => movedIds.has(g.id) && g.memberIds?.includes(id))) continue
+    const parent = groups.filter((g) => {
+      if (descendants.has(g.id)) return false
+      if (g.layout !== 'list') return contains(g, n)
+      if (n.type !== 'text' && n.type !== 'image') return false
+      const point = drop ?? { x: n.x + n.width / 2, y: n.y + n.height / 2 }
+      return point.x >= g.x && point.x <= g.x + g.width && point.y >= g.y && point.y <= g.y + g.height
+    }).sort((a, b) =>
       a.width * a.height - b.width * b.height || Number(!!b.memberIds?.includes(id)) - Number(!!a.memberIds?.includes(id)))[0]
     for (const g of groups) {
       const members = memberships.get(g.id)!.filter((member) => member !== id)
@@ -175,6 +219,11 @@ export function updateMembership(ids: Iterable<string>) {
   }
   for (const g of groups) {
     const memberIds = memberships.get(g.id)!
+    if (g.layout === 'list') memberIds.sort((a, b) => {
+      const first = documentStore.getNode(a)!, second = documentStore.getNode(b)!
+      const position = (n: CanvasNode) => movedIds.has(n.id) ? (drop?.y ?? n.y + n.height / 2) : n.y + n.height / 2
+      return position(first) - position(second) || first.y - second.y || first.x - second.x
+    })
     if (JSON.stringify(memberIds) !== JSON.stringify(g.memberIds ?? [])) patches.set(g.id, { memberIds })
   }
   documentStore.updateNodes(patches)
@@ -216,7 +265,7 @@ function updateSelectionDrag(info: PointerInfo, env: ToolEnv, state: ToolState) 
     const selected = d.paintedSelection ??= new Set<string>()
     for (const n of nodes) {
       if (n.type === 'group' || selected.has(n.id) || !segmentHitsRect(previous, info.world, n, radius + (n.type === 'draw' ? (n.strokeWidth ?? 3) / 2 : 0))) continue
-      if (n.type !== 'draw') { selected.add(n.id); continue }
+      if (n.type !== 'draw' && n.type !== 'rectangle') { selected.add(n.id); continue }
       for (let i = 0; i <= steps; i++) {
         const t = i / steps
         if (hitTest({ nodes: [n] }, previous.x + (info.world.x - previous.x) * t, previous.y + (info.world.y - previous.y) * t, radius)) { selected.add(n.id); break }
@@ -289,7 +338,7 @@ export const tools: Record<ToolId, Tool> = {
         updateSelectionDrag(info, env, state)
         env.setMarquee(null); env.setPaintTrail(null)
       }
-      if (d?.type === 'move' && d.moved && d.origins) updateMembership(d.origins.keys())
+      if (d?.type === 'move' && d.moved && d.origins) updateMembership(d.origins.keys(), info.world)
       state.dragging = null
     },
     onDoubleClick(info, env) {
@@ -318,6 +367,45 @@ export const tools: Record<ToolId, Tool> = {
         env.setTool('select')
       }
       state.dragging = null
+    },
+  },
+  list: {
+    id: 'list',
+    onPointerDown(info, env, state) { tools.box.onPointerDown?.(info, env, state) },
+    onPointerMove(info, env, state) { tools.box.onPointerMove?.(info, env, state) },
+    onPointerUp(_info, env, state) {
+      const rect = state.dragging?.rect
+      env.setMarquee(null)
+      if (rect && rect.width > 20 && rect.height > 20) {
+        const ids = new Set((documentStore.getSnapshot().nodes ?? []).filter((n) => contains(rect, n)).map((n) => n.id))
+        const list = createList(rect, ids)
+        env.setSelection(new Set([list.id])); env.setTool('select')
+      }
+      state.dragging = null
+    },
+  },
+  rectangle: {
+    id: 'rectangle',
+    onPointerDown(info, env, state) {
+      const node: RectangleNode = { id: uid(), type: 'rectangle', ...info.world, width: 160, height: 100 }
+      documentStore.addNode(node)
+      env.setSelection(new Set([node.id]))
+      state.dragging = { type: 'rectangle', startWorld: info.world, startScreen: info.screen, fromId: node.id, moved: false }
+    },
+    onPointerMove(info, _env, state) {
+      const d = state.dragging
+      if (d?.type !== 'rectangle' || !d.fromId) return
+      if (Math.hypot(info.screen.x - d.startScreen.x, info.screen.y - d.startScreen.y) > 3) d.moved = true
+      if (d.moved) documentStore.updateNode(d.fromId, {
+        x: Math.min(d.startWorld.x, info.world.x), y: Math.min(d.startWorld.y, info.world.y),
+        width: Math.max(8, Math.abs(info.world.x - d.startWorld.x)), height: Math.max(8, Math.abs(info.world.y - d.startWorld.y)),
+      })
+    },
+    onPointerUp(info, env, state) {
+      tools.rectangle.onPointerMove?.(info, env, state)
+      if (state.dragging?.fromId) updateMembership([state.dragging.fromId])
+      state.dragging = null
+      env.setTool('select')
     },
   },
   draw: {

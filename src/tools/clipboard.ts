@@ -63,6 +63,30 @@ export function readClipboard(data: DataTransfer): ClipboardSelection | null {
   }
 }
 
+export async function copyToSystemClipboard(ids: Set<string>) {
+  const content = copySelection(ids)
+  if (!content) return false
+  const data = new DataTransfer()
+  writeClipboard(data, content)
+  await navigator.clipboard.write([new ClipboardItem({
+    'text/plain': new Blob([data.getData('text/plain')], { type: 'text/plain' }),
+    'text/html': new Blob([data.getData('text/html')], { type: 'text/html' }),
+  })])
+  return true
+}
+
+export async function readSystemClipboard() {
+  const data = new DataTransfer()
+  for (const item of await navigator.clipboard.read()) {
+    for (const type of item.types) {
+      const blob = await item.getType(type)
+      if (type === 'text/html' || type === 'text/plain') data.setData(type, await blob.text())
+      else if (type.startsWith('image/')) data.items.add(new File([blob], 'clipboard.png', { type }))
+    }
+  }
+  return data
+}
+
 export function pasteSelection(content: ClipboardSelection, origin: DrawPoint): Set<string> {
   const { nodes, edges, selection } = JSON.parse(JSON.stringify(content)) as ClipboardSelection
   const idMap = new Map(nodes.map((node) => [node.id, uid()]))
