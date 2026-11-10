@@ -29,7 +29,7 @@ export function restoreNode(raw: unknown): CanvasNode | null {
     case 'text':
       return { ...base, type: 'text', text: typeof n.text === 'string' ? n.text : '' }
     case 'file':
-      return { ...base, type: 'file', file: typeof n.file === 'string' ? n.file : '' }
+      return { ...base, type: 'file', file: typeof n.file === 'string' ? n.file : '', subpath: typeof n.subpath === 'string' ? n.subpath : undefined }
     case 'link':
       return { ...base, type: 'link', url: typeof n.url === 'string' ? n.url : '' }
     case 'image': {

@@ -8,6 +8,7 @@ import { edgeGeometry, hitTest, PRESET_COLORS, strokePath } from '../src/render/
 import { createImageCard, createTextCard, duplicateNodes, expandSelection, finishConnection, moveConnection, splitImageCaption, startConnection, tools, ToolState, type ToolEnv, type PointerInfo } from '../src/tools/tools'
 import { importCanvasFile, loadLocal, saveLocal, saveRecovery } from '../src/persistence'
 import { cropImage, uncroppedBounds, type CropHandle } from '../src/tools/imageCrop'
+import { CLIPBOARD_MIME, copySelection, pasteSelection, readClipboard, writeClipboard } from '../src/tools/clipboard'
 import type { CanvasNode, GroupNode, ImageNode, TextNode } from '../src/types'
 
 const card = (id: string, x = 20, y = 20): TextNode => ({ id, type: 'text', x, y, width: 100, height: 60, text: id })
@@ -121,6 +122,131 @@ test('duplicating nested groups remaps members and internal connections', () => 
   documentStore.undo()
   assert.equal(documentStore.getSnapshot().nodes!.length, 4)
   assert.equal(documentStore.getSnapshot().edges!.length, 1)
+})
+
+function clipboardData() {
+  const values = new Map<string, string>()
+  return {
+    getData: (type: string) => values.get(type) ?? '',
+    setData: (type: string, value: string) => { values.set(type, value) },
+    clearData: (type: string) => { values.delete(type) },
+  } as DataTransfer
+}
+
+test('single card clipboard keeps multiline text, color and size, with readable external text', () => {
+  const original = { ...card('a', -120, 90), text: '<想法 & "notes">\n第二行', color: '#abcdef' as const, width: 237, height: 123 }
+  documentStore.load({ nodes: [original] })
+  const data = clipboardData()
+  writeClipboard(data, copySelection(new Set(['a']))!)
+  assert.equal(data.getData('text/plain'), original.text)
+  assert.match(data.getData('text/html'), /&lt;想法 &amp; &quot;notes&quot;&gt;/)
+  const content = readClipboard(data)!
+  documentStore.updateNode('a', { text: 'changed after copying', width: 300 })
+  const selection = pasteSelection(content, { x: 800, y: -50 })
+  const pasted = documentStore.getNode([...selection][0])!
+  assert.notEqual(pasted.id, original.id)
+  assert.deepEqual(pasted, { ...original, id: pasted.id, x: 800, y: -50 })
+  documentStore.undo()
+  assert.equal(documentStore.getSnapshot().nodes!.length, 1)
+  assert.equal((documentStore.getNode('a') as TextNode).text, 'changed after copying')
+  documentStore.redo()
+  assert.deepEqual(documentStore.getNode(pasted.id), pasted)
+})
+
+test('multi-card clipboard survives a new document and remaps only internal styled connections', () => {
+  documentStore.load({ nodes: [card('a', -50, 40), card('b', 250, 180), card('outside', 900)], edges: [
+    { id: 'ab', fromNode: 'a', toNode: 'b', fromSide: 'bottom', toSide: 'left', fromEnd: 'none', toEnd: 'arrow', color: '#123456', label: 'next', labelIsVisible: false, labelOffset: { x: 12, y: -8 }, lineStyle: 'straight' },
+    { id: 'external', fromNode: 'a', toNode: 'outside' },
+  ] })
+  const sourceEdge = documentStore.getSnapshot().edges![0]
+  const data = clipboardData()
+  writeClipboard(data, copySelection(new Set(['a', 'b']))!)
+  // Browsers may only retain the standard HTML and text clipboard formats.
+  data.clearData(CLIPBOARD_MIME)
+  const content = readClipboard(data)!
+  documentStore.load({ nodes: [] })
+  const selection = pasteSelection(content, { x: 600, y: 500 })
+  const [a, b] = documentStore.getSnapshot().nodes!
+  assert.equal(selection.size, 2)
+  assert.deepEqual([a.x, a.y, b.x, b.y], [600, 500, 900, 640])
+  const [edge] = documentStore.getSnapshot().edges!
+  assert.equal(documentStore.getSnapshot().edges!.length, 1)
+  assert.notEqual(edge.id, sourceEdge.id)
+  assert.deepEqual(edge, { ...sourceEdge, id: edge.id, fromNode: a.id, toNode: b.id })
+  const repeated = pasteSelection(content, { x: 1000, y: 100 })
+  assert.ok([...repeated].every((id) => !selection.has(id)))
+  assert.equal(documentStore.getSnapshot().edges!.length, 2)
+  documentStore.undo()
+  assert.equal(documentStore.getSnapshot().nodes!.length, 2)
+  assert.equal(documentStore.getSnapshot().edges!.length, 1)
+  documentStore.undo()
+  assert.equal(documentStore.getSnapshot().nodes!.length, 0)
+  assert.equal(documentStore.getSnapshot().edges!.length, 0)
+})
+
+test('clipboard preserves all card formats, crop, drawing points and file subpaths', () => {
+  documentStore.load({ nodes: [
+    { ...card('text'), color: '4' },
+    { ...card('image', 200), type: 'image', url: 'data:image/png;base64,abc', text: 'caption', naturalWidth: 800, naturalHeight: 600, crop: { x: 0.1, y: 0.2, width: 0.5, height: 0.6 } },
+    { ...card('draw', 400), type: 'draw', color: '6', strokeWidth: 9, points: [{ x: 0, y: 0 }, { x: 100, y: 60 }] },
+    { ...card('link', 600), type: 'link', url: 'https://example.com' },
+    { ...card('file', 800), type: 'file', file: 'notes.md', subpath: '#idea' },
+  ] })
+  const originals = documentStore.toJSON().nodes!
+  const data = clipboardData()
+  writeClipboard(data, copySelection(new Set(originals.map((node) => node.id)))!)
+  const selection = pasteSelection(readClipboard(data)!, { x: 1020, y: 220 })
+  const copies = documentStore.getSnapshot().nodes!.filter((node) => selection.has(node.id))
+  for (let i = 0; i < originals.length; i++) {
+    assert.deepEqual(JSON.parse(JSON.stringify(copies[i])), { ...originals[i], id: copies[i].id, x: originals[i].x + 1000, y: originals[i].y + 200 })
+  }
+})
+
+test('clipboard preserves explicit nested group structure and joins destination groups', () => {
+  // Explicit members can extend beyond the group bounds.
+  const inner = { ...frame(['a']), id: 'inner', width: 150, height: 120, background: 'pattern', backgroundStyle: 'repeat' as const }
+  documentStore.load({ nodes: [card('a', 400, 400), card('b', 200), inner, frame(['inner', 'b'])], edges: [{ id: 'ab', fromNode: 'a', toNode: 'b' }] })
+  const data = clipboardData()
+  writeClipboard(data, copySelection(new Set(['group']))!)
+  const content = readClipboard(data)!
+  documentStore.load({ nodes: [{ ...frame([]), id: 'destination', x: 900, y: 900, width: 1000, height: 1000 }] })
+  const selection = pasteSelection(content, { x: 1000, y: 1000 })
+  assert.equal(selection.size, 1)
+  const group = documentStore.getNode([...selection][0]) as GroupNode
+  const descendants = expandSelection(selection)
+  assert.equal(descendants.size, 4)
+  assert.ok(group.memberIds!.every((id) => descendants.has(id)))
+  const copiedInner = documentStore.getNode(group.memberIds![0]) as GroupNode
+  assert.equal(copiedInner.background, 'pattern')
+  assert.equal(copiedInner.backgroundStyle, 'repeat')
+  assert.equal(copiedInner.memberIds!.length, 1)
+  assert.ok(descendants.has(copiedInner.memberIds![0]))
+  assert.deepEqual((documentStore.getNode('destination') as GroupNode).memberIds, [group.id])
+  const edge = documentStore.getSnapshot().edges![0]
+  assert.ok(descendants.has(edge.fromNode) && descendants.has(edge.toNode))
+  documentStore.undo()
+  assert.equal(documentStore.getSnapshot().nodes!.length, 1)
+  assert.deepEqual((documentStore.getNode('destination') as GroupNode).memberIds, [])
+})
+
+test('clipboard includes members of legacy groups without explicit membership', () => {
+  documentStore.load({ nodes: [card('a'), card('b', 200), { ...frame(), memberIds: undefined }] })
+  const content = copySelection(new Set(['group']))!
+  documentStore.load({ nodes: [] })
+  const selection = pasteSelection(content, { x: 500, y: 500 })
+  assert.equal(expandSelection(selection).size, 3)
+})
+
+test('clipboard ignores foreign, malformed and unsupported selection data', () => {
+  assert.equal(copySelection(new Set(['missing'])), null)
+  const data = clipboardData()
+  for (const value of ['', 'hello', '{}', 'null', '{"type":"see/selection","version":2}', '{"type":"see/selection","version":1,"nodes":[],"selection":[]}']) {
+    data.setData(CLIPBOARD_MIME, value)
+    assert.equal(readClipboard(data), null)
+  }
+  data.clearData(CLIPBOARD_MIME)
+  data.setData('text/html', '<div data-see-selection="%malformed">text</div>')
+  assert.equal(readClipboard(data), null)
 })
 
 test('moving a group moves all descendants once and can be undone together', () => {

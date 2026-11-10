@@ -13,6 +13,7 @@ import { IconButton } from './IconButton'
 import { StylePalette } from './StylePalette'
 import { CanvasControls } from './CanvasControls'
 import { preferencesStore } from '../store/preferences'
+import { copySelection, pasteSelection, readClipboard, writeClipboard } from '../tools/clipboard'
 
 const IMAGE_URL_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|avif|svg|bmp)(\?\S*)?$/i
 const isTypingTarget = (e: Event) => { const t = e.target as HTMLElement | null; return !!t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) }
@@ -27,7 +28,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const dragToolRef = useRef<ToolId>('select')
   const toolRef = useRef(props.tool)
   const spaceRestoreRef = useRef<ToolId | null>(null)
-  const lastWorldRef = useRef<{ x: number; y: number } | null>(null)
+  const lastScreenRef = useRef<{ x: number; y: number } | null>(null)
   const draftCardRef = useRef<string | null>(null)
   const redraw = useRef<() => void>(() => {})
   toolRef.current = props.tool
@@ -123,6 +124,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     const focused = document.activeElement as HTMLElement | null
     if (focused?.isContentEditable) focused.blur()
     const info = toPointerInfo(e)
+    lastScreenRef.current = info.screen
     containerRef.current?.setPointerCapture(e.pointerId)
     setEdgeId(null)
     if (e.button === 1 || props.tool === 'hand') { dragToolRef.current = 'hand'; tools.hand.onPointerDown?.(info, env, state); setInteracting(true); return }
@@ -136,7 +138,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   }
   const onPointerMove = (e: React.PointerEvent) => {
     const info = toPointerInfo(e)
-    lastWorldRef.current = info.world
+    lastScreenRef.current = (e.target as Element).closest('.floating-panel, .board-chrome') ? null : info.screen
     if (state.dragging?.type === 'connect') moveConnection(info, env, state)
     else if (state.dragging?.type === 'draw' || state.dragging?.type === 'marquee') {
       const tool = state.dragging.type === 'draw' ? tools.draw : tools.select
@@ -244,10 +246,25 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     })
   }, [props.setTool])
   useEffect(() => {
+    const onCopy = (e: ClipboardEvent) => {
+      if (e.defaultPrevented || isTypingTarget(e) || cropId || state.dragging || !e.clipboardData) return
+      const content = copySelection(selection)
+      if (!content) return
+      writeClipboard(e.clipboardData, content)
+      e.preventDefault()
+    }
     const onPaste = (e: ClipboardEvent) => {
-      if (isTypingTarget(e) || cropId) return
+      if (e.defaultPrevented || isTypingTarget(e) || cropId || state.dragging) return
+      const pointer = lastScreenRef.current, board = containerRef.current!
+      const origin = pointer && pointer.x >= 0 && pointer.y >= 0 && pointer.x < board.clientWidth && pointer.y < board.clientHeight
+        ? cameraStore.screenToWorld(pointer.x, pointer.y) : viewportCenterWorld()
+      const content = e.clipboardData ? readClipboard(e.clipboardData) : null
+      if (content) {
+        e.preventDefault()
+        setSelection(pasteSelection(content, origin)); setEdgeId(null); props.setTool('select')
+        return
+      }
       const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith('image/'))
-      const origin = lastWorldRef.current ?? viewportCenterWorld()
       if (files.length) { e.preventDefault(); setSelection(new Set()); addFiles(files, origin); return }
       const text = e.clipboardData?.getData('text/plain')?.trim() ?? ''
       if (text) {
@@ -257,9 +274,9 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
         props.setTool('select')
       }
     }
-    window.addEventListener('paste', onPaste)
-    return () => window.removeEventListener('paste', onPaste)
-  }, [addFiles, cropId, props.setTool])
+    window.addEventListener('copy', onCopy); window.addEventListener('paste', onPaste)
+    return () => { window.removeEventListener('copy', onCopy); window.removeEventListener('paste', onPaste) }
+  }, [addFiles, selection, cropId, props.setTool, state])
   const fit = () => {
     const nodes = documentStore.getSnapshot().nodes ?? []
     if (!nodes.length) { cameraStore.set({ x: 0, y: 0, zoom: 1 }); return }
@@ -268,7 +285,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     const b = containerRef.current!, zoom = clampZoom(Math.min(1.5, (b.clientWidth - 160) / Math.max(1, w), (b.clientHeight - 180) / Math.max(1, h)))
     cameraStore.set({ zoom, x: (b.clientWidth - w * zoom) / 2 - x * zoom, y: (b.clientHeight - h * zoom) / 2 - y * zoom })
   }
-  return <div ref={containerRef} className={`board tool-${props.tool} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={() => { if (state.dragging) cancel() }} onDoubleClick={onDoubleClick}
+  return <div ref={containerRef} className={`board tool-${props.tool} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={() => { lastScreenRef.current = null }} onPointerUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={() => { if (state.dragging) cancel() }} onDoubleClick={onDoubleClick}
     onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragOver(true) } }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false) }}
     onDrop={(e) => { e.preventDefault(); setDragOver(false); setSelection(new Set()); addFiles(Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/')), toPointerInfo(e).world) }}>
     <canvas ref={staticRef} className="canvas static" /><canvas ref={interactiveRef} className="canvas interactive" />
