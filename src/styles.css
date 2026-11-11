@@ -174,6 +174,7 @@ button { touch-action: manipulation; }
 .minimap-fit { position: absolute; top: 8px; right: 8px; width: 25px; height: 25px; background: #ffffffdf; border-radius: 6px; }
 .minimap-fit svg { width: 16px; height: 16px; }
 .ui-hidden .toolbar, .ui-hidden .draw-settings, .ui-hidden .selection-bar, .ui-hidden .edge-bar, .ui-hidden .resize-bounds, .ui-hidden .block-connect { display: none; }
+.app:has(.board.touch-editing) .primary-tools, .board.touch-editing .canvas-controls, .board.touch-editing .selection-bar { display: none; }
 .drop-overlay { position: absolute; inset: 15px; border: 2px dashed var(--accent); background: #eef5f8ea; border-radius: 18px; display: grid; place-items: center; color: var(--accent); z-index: 12; pointer-events: none; font-size: 20px; }
 .image-crop-layer { position: absolute; inset: 0; z-index: 6; pointer-events: none; }
 .crop-original { position: absolute; opacity: .24; pointer-events: none; }

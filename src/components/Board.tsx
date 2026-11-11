@@ -21,6 +21,7 @@ import { CanvasContextMenu, type ContextTarget } from './CanvasContextMenu'
 import { LaserTrail } from '../tools/laser'
 import { LaserLayer } from './LaserLayer'
 import { TouchNavigation } from '../tools/touchNavigation'
+import { editingCamera } from '../render/editing'
 
 const IMAGE_URL_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|avif|svg|bmp)(\?\S*)?$/i
 const isTypingTarget = (e: Event) => { const t = e.target as HTMLElement | null; return !!t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) }
@@ -49,6 +50,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const [marquee, setMarquee] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
   const [paintTrail, setPaintTrail] = useState<DrawPoint[] | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const touchEditing = editingId !== null && window.matchMedia('(pointer: coarse)').matches
   const [activeStroke, setActiveStroke] = useState<{ x: number; y: number }[] | null>(null)
   const [drawStyle, setDrawStyle] = useState<DrawStyle>({ strokeWidth: 4 })
   const [interacting, setInteracting] = useState(false)
@@ -64,6 +66,41 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const state = toolStateRef.current
   const cropNode = cropId ? doc.nodes?.find((n): n is ImageNode => n.id === cropId && n.type === 'image') : null
   useEffect(() => { if (cropId && (!selection.has(cropId) || selection.size !== 1 || props.tool !== 'select' || !cropNode)) setCropId(null) }, [selection, cropId, cropNode, props.tool])
+
+  useLayoutEffect(() => {
+    if (!touchEditing) return
+    const board = containerRef.current!
+    const editor = board.querySelector<HTMLElement>('[contenteditable="true"]')
+    const card = editor?.closest<HTMLElement>('[data-node-id]')
+    if (!editor || !card) return
+    let raf = 0
+    const update = () => {
+      raf = 0
+      if (document.activeElement !== editor) return
+      const origin = board.getBoundingClientRect()
+      const relative = (rect: DOMRect) => ({ x: rect.left - origin.left, y: rect.top - origin.top, width: rect.width, height: rect.height })
+      const selection = window.getSelection()
+      const caret = selection?.rangeCount && editor.contains(selection.focusNode) ? selection.getRangeAt(0).getBoundingClientRect() : null
+      const camera = cameraStore.getSnapshot()
+      const next = editingCamera(camera, relative(card.getBoundingClientRect()), { width: board.clientWidth, height: board.clientHeight }, caret?.height ? relative(caret) : undefined)
+      if (next !== camera) cameraStore.set(next)
+    }
+    const schedule = () => { if (!raf) raf = requestAnimationFrame(update) }
+    const observer = new ResizeObserver(schedule)
+    observer.observe(board); observer.observe(card)
+    document.addEventListener('selectionchange', schedule)
+    editor.addEventListener('input', schedule)
+    window.visualViewport?.addEventListener('resize', schedule)
+    window.visualViewport?.addEventListener('scroll', schedule)
+    update()
+    return () => {
+      cancelAnimationFrame(raf); observer.disconnect()
+      document.removeEventListener('selectionchange', schedule)
+      editor.removeEventListener('input', schedule)
+      window.visualViewport?.removeEventListener('resize', schedule)
+      window.visualViewport?.removeEventListener('scroll', schedule)
+    }
+  }, [editingId, touchEditing])
 
   useLayoutEffect(() => {
     const top = containerRef.current!.getBoundingClientRect().top
@@ -455,7 +492,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     setCropId(null); props.setTool('select')
     setContextMenu({ x: e.clientX, y: e.clientY, world: info.world, nodeId: node?.id, edgeId: clickedEdge })
   }
-  return <div ref={containerRef} className={`board tool-${props.tool} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDownCapture={onTouchPointerDown} onPointerMoveCapture={onTouchPointerMove} onPointerUpCapture={onTouchPointerEnd} onPointerCancelCapture={onTouchPointerEnd} onLostPointerCaptureCapture={onTouchPointerEnd} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={() => { lastScreenRef.current = null }} onPointerUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={() => { if (state.dragging) cancel() }} onDoubleClick={onDoubleClick} onContextMenu={onContextMenu}
+  return <div ref={containerRef} className={`board tool-${props.tool} ${touchEditing ? 'touch-editing' : ''} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDownCapture={onTouchPointerDown} onPointerMoveCapture={onTouchPointerMove} onPointerUpCapture={onTouchPointerEnd} onPointerCancelCapture={onTouchPointerEnd} onLostPointerCaptureCapture={onTouchPointerEnd} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={() => { lastScreenRef.current = null }} onPointerUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={() => { if (state.dragging) cancel() }} onDoubleClick={onDoubleClick} onContextMenu={onContextMenu}
     onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragOver(true) } }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false) }}
     onDrop={(e) => { e.preventDefault(); setDragOver(false); setSelection(new Set()); addFiles(Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/')), toPointerInfo(e).world) }}>
     <canvas ref={staticRef} className="canvas static" /><canvas ref={interactiveRef} className="canvas interactive" />

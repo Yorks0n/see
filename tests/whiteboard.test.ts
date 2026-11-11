@@ -13,6 +13,7 @@ import { selectionSVG } from '../src/tools/export'
 import { SHORTCUTS } from '../src/shortcuts'
 import { LASER_LIFETIME, LaserTrail } from '../src/tools/laser'
 import { TouchNavigation } from '../src/tools/touchNavigation'
+import { editingCamera } from '../src/render/editing'
 import { deleteLocalFile, importCanvasFile, initializeLocal, loadLocal, saveCanvas, saveLocal, saveRecovery, setActiveFile } from '../src/persistence'
 import { LIBRARY_KEY, LibraryStore } from '../src/store/library'
 import { cropImage, uncroppedBounds, type CropHandle } from '../src/tools/imageCrop'
@@ -32,6 +33,39 @@ function environment(selection = new Set<string>()): ToolEnv {
   const env: ToolEnv = { selection, setSelection: (next) => { env.selection = next }, selectionOutline: false, setSelectionOutline: (outline) => { env.selectionOutline = outline }, setDragPreview: () => {}, setMarquee: () => {}, setPaintTrail: () => {}, addLaserPoint: () => {}, setEditingId: () => {}, setTool: () => {}, drawStyle: { color: '5', strokeWidth: 4 } }
   return env
 }
+
+test('touch editing lifts cards above the keyboard with space below and preserves canvas zoom', () => {
+  const camera = { x: 40, y: -20, zoom: 0.59 }
+  const card = { x: 100, y: 350, width: 160, height: 50 }
+  const next = editingCamera(camera, card, { width: 390, height: 420 })
+  assert.deepEqual(next, { ...camera, y: -96 })
+  assert.deepEqual(card, { x: 100, y: 350, width: 160, height: 50 })
+  assert.equal(editingCamera(next, { ...card, y: card.y + next.y - camera.y }, { width: 390, height: 420 }), next)
+})
+
+test('touch editing leaves comfortably visible cards in place and adapts to keyboard resizing', () => {
+  const camera = { x: 0, y: 0, zoom: 1 }, card = { x: 100, y: 400, width: 200, height: 60 }
+  assert.equal(editingCamera(camera, card, { width: 390, height: 844 }), camera)
+  const next = editingCamera(camera, card, { width: 390, height: 440 })
+  assert.equal(card.y + next.y + card.height, 344)
+  assert.equal(editingCamera(next, { ...card, y: card.y + next.y }, { width: 390, height: 844 }), next)
+})
+
+test('touch editing keeps long-card carets visible rather than moving the entire card into view', () => {
+  const camera = { x: 0, y: 0, zoom: 2 }
+  const card = { x: 80, y: -300, width: 200, height: 1000 }
+  const size = { width: 390, height: 420 }
+  assert.equal(editingCamera(camera, card, size, { x: 110, y: 200, width: 1, height: 24 }), camera)
+  assert.equal(editingCamera(camera, card, size, { x: 110, y: 380, width: 1, height: 24 }).y, -80)
+  assert.equal(editingCamera(camera, card, size, { x: 110, y: 20, width: 1, height: 24 }).y, 60)
+})
+
+test('touch editing avoids horizontal clipping and remains usable in short viewports', () => {
+  const camera = { x: 0, y: 0, zoom: 1 }
+  assert.equal(editingCamera(camera, { x: 300, y: 100, width: 200, height: 60 }, { width: 390, height: 420 }).x, -134)
+  const next = editingCamera(camera, { x: -500, y: -400, width: 1000, height: 1000 }, { width: 390, height: 180 }, { x: 380, y: 160, width: 1, height: 24 })
+  assert.deepEqual(next, { x: -15, y: -49, zoom: 1 })
+})
 
 test('two touch pointers pan and zoom around their moving midpoint', () => {
   const touch = new TouchNavigation(), camera = { x: 40, y: -20, zoom: 0.5 }
