@@ -79,7 +79,6 @@ export function Toolbar(props: { tool: ToolId; setTool: (t: ToolId) => void; onS
       { label: '保存到本地', shortcut: shortcut('save'), action: () => { void requestPersistentStorage(); void saveLocal().catch(() => {}) } },
       { label: '打开白板…', shortcut: shortcut('open'), action: () => importRef.current?.click() },
       { label: '下载 .canvas', action: download },
-      { label: '云端同步…', action: () => setCloudOpen(true) },
     ],
     编辑: [command('撤销', 'undo', !documentStore.canUndo), command('重做', 'redo', !documentStore.canRedo), null, command('剪切', 'cut'), command('复制', 'copy'), command('粘贴', 'paste'), command('创建副本', 'duplicate'), null, command('全选', 'select-all'), command('组合', 'group'), command('取消组合 / 解散列表', 'ungroup'), command('删除', 'delete')],
     视图: [command('缩放至全部内容', 'fit'), command('缩放至 100%', 'reset-zoom'), command('显示 / 隐藏界面', 'toggle-ui')],
@@ -100,7 +99,7 @@ export function Toolbar(props: { tool: ToolId; setTool: (t: ToolId) => void; onS
         <MenuItems items={[...Object.entries(menus).map(([label, items]) => ({ label, items })), null, { label: '插入媒体文件…', shortcut: shortcut('media'), action: () => fileRef.current?.click() }, command('键盘快捷方式', 'shortcuts')]} onChoose={() => setMenuOpen(false)} />
       </PopupMenu>}
     </div>
-    {expanded && <FilesSidebar onError={setError} />}
+    {expanded && <FilesSidebar onError={setError} onLogin={() => setCloudOpen(true)} />}
     <div id="left-tools" className="primary-tools floating-panel" role="toolbar" aria-label="画布工具" aria-orientation="vertical">
       {TOOLS.map((t) => <IconButton key={t.id} icon={t.icon} label={`${t.label} · ${shortcut(t.id)}`} active={props.tool === t.id} onClick={() => props.setTool(t.id)} />)}
       <div className="toolbar-image" ref={popRef}>

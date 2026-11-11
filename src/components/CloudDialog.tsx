@@ -19,13 +19,15 @@ export function CloudDialog({ onClose }: { onClose: () => void }) {
           .catch((error: Error) => setError(error.message)).finally(() => setBusy(false))
       }}>
       <div className="popover-heading"><span>云端同步</span><IconButton type="button" icon={X} label="关闭同步设置" onClick={onClose} /></div>
-      <label>服务器<input autoFocus type="url" required value={server} onChange={(event) => setServer(event.target.value)} /></label>
-      <label>账号<input autoComplete="username" required value={username} onChange={(event) => setUsername(event.target.value)} /></label>
-      <label>密码<input type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-      <p>登录后，此浏览器中的白板将同步到你的服务器。退出登录会保留本机副本。</p>
+      {cloud.enabled ? <p>{cloud.username}</p> : <>
+        <label>服务器<input autoFocus type="url" required value={server} onChange={(event) => setServer(event.target.value)} /></label>
+        <label>账号<input autoComplete="username" required value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+        <label>密码<input type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+        <p>登录后，此浏览器中的白板将同步到你的服务器。退出登录会保留本机副本。</p>
+      </>}
       {(error || cloud.message) && <p role="alert">{error || cloud.message}</p>}
       <div className="cloud-actions">
-        <button type="submit" disabled={busy}>{busy ? '正在登录…' : '登录并同步'}</button>
+        {!cloud.enabled && <button type="submit" disabled={busy}>{busy ? '正在登录…' : '登录并同步'}</button>}
         {cloud.enabled && <>
           <button type="button" disabled={busy} onClick={() => { void syncNow() }}>立即同步</button>
           <button type="button" disabled={busy} onClick={() => {

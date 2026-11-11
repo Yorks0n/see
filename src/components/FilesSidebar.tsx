@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { libraryStore } from '../store/library'
-import { DotsThree, File, PushPin, Plus } from './icons'
+import { DotsThree, File, PushPin, Plus, User } from './icons'
 import { IconButton } from './IconButton'
 import { MenuItems, PopupMenu, type MenuItem } from './Menu'
+import { cloudStore } from '../sync/cloud'
 
-export function FilesSidebar({ onError }: { onError: (message: string) => void }) {
+export function FilesSidebar({ onError, onLogin }: { onError: (message: string) => void; onLogin: () => void }) {
   const library = useSyncExternalStore(libraryStore.subscribe, libraryStore.getSnapshot)
+  const cloud = useSyncExternalStore(cloudStore.subscribe, cloudStore.getSnapshot)
   const [search, setSearch] = useState('')
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null)
@@ -38,6 +40,12 @@ export function FilesSidebar({ onError }: { onError: (message: string) => void }
           setMenu(menu?.id === file.id ? null : { id: file.id, x: rect.right + 8, y: rect.top })
         }} />
       </div>)}
+    </div>
+    <div className="sidebar-account">
+      <button className="sidebar-account-button" aria-haspopup="dialog" title={cloud.enabled ? `账号：${cloud.username}` : undefined} onClick={onLogin}>
+        <span className="sidebar-account-avatar" aria-hidden="true">{cloud.enabled ? cloud.username.slice(0, 1).toUpperCase() : <User size={17} />}</span>
+        <span>{cloud.enabled ? cloud.username : '登录'}</span>
+      </button>
     </div>
     {menu && menuFile && <PopupMenu key={menu.id} label="白板菜单" position={menu} onClose={() => setMenu(null)}><MenuItems items={items} onChoose={() => setMenu(null)} /></PopupMenu>}
   </nav>
