@@ -20,6 +20,7 @@ import { ShortcutsDialog } from './ShortcutsDialog'
 import { CanvasContextMenu, type ContextTarget } from './CanvasContextMenu'
 import { LaserTrail } from '../tools/laser'
 import { LaserLayer } from './LaserLayer'
+import { TouchNavigation } from '../tools/touchNavigation'
 
 const IMAGE_URL_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|avif|svg|bmp)(\?\S*)?$/i
 const isTypingTarget = (e: Event) => { const t = e.target as HTMLElement | null; return !!t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) }
@@ -31,6 +32,8 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const containerRef = useRef<HTMLDivElement>(null)
   const boardTopRef = useRef<number | null>(null)
   const toolStateRef = useRef(new ToolState())
+  const touchNavigationRef = useRef(new TouchNavigation())
+  const touchSelectionRef = useRef({ selection: new Set<string>(), selectionOutline: false })
   const laserRef = useRef(new LaserTrail())
   const dragToolRef = useRef<ToolId>('select')
   const toolRef = useRef(props.tool)
@@ -145,6 +148,39 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     }
     documentStore.updateNode(id, { text })
     setEditingId(null)
+  }
+  const onTouchPointerDown = (e: React.PointerEvent) => {
+    if (e.pointerType !== 'touch') return
+    const touch = touchNavigationRef.current
+    if (!touch.active && (e.target as Element).closest('.floating-panel, .board-chrome, [contenteditable="true"], input, textarea, select, .resize-handle, .image-crop-bounds, .connection-label')) return
+    if (!touch.size) touchSelectionRef.current = { selection: new Set(selection), selectionOutline }
+    const wasActive = touch.active
+    touch.start(e.pointerId, toPointerInfo(e).screen, cameraStore.getSnapshot())
+    if (!touch.active) return
+    e.preventDefault(); e.stopPropagation()
+    containerRef.current?.setPointerCapture(e.pointerId)
+    if (!wasActive) {
+      cancel()
+      setSelection(new Set(touchSelectionRef.current.selection))
+      setSelectionOutline(touchSelectionRef.current.selectionOutline)
+      lastScreenRef.current = null
+    }
+    setInteracting(true)
+  }
+  const onTouchPointerMove = (e: React.PointerEvent) => {
+    const touch = touchNavigationRef.current
+    if (!touch.has(e.pointerId)) return
+    const next = touch.move(e.pointerId, toPointerInfo(e).screen)
+    if (!touch.active) return
+    e.preventDefault(); e.stopPropagation()
+    if (next) cameraStore.set(next)
+  }
+  const onTouchPointerEnd = (e: React.PointerEvent) => {
+    const touch = touchNavigationRef.current
+    if (!touch.end(e.pointerId, cameraStore.getSnapshot())) return
+    e.preventDefault(); e.stopPropagation()
+    if (containerRef.current?.hasPointerCapture(e.pointerId)) containerRef.current.releasePointerCapture(e.pointerId)
+    setInteracting(touch.active)
   }
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 && e.button !== 1) return
@@ -413,7 +449,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     setCropId(null); props.setTool('select')
     setContextMenu({ x: e.clientX, y: e.clientY, world: info.world, nodeId: node?.id, edgeId: clickedEdge })
   }
-  return <div ref={containerRef} className={`board tool-${props.tool} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={() => { lastScreenRef.current = null }} onPointerUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={() => { if (state.dragging) cancel() }} onDoubleClick={onDoubleClick} onContextMenu={onContextMenu}
+  return <div ref={containerRef} className={`board tool-${props.tool} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDownCapture={onTouchPointerDown} onPointerMoveCapture={onTouchPointerMove} onPointerUpCapture={onTouchPointerEnd} onPointerCancelCapture={onTouchPointerEnd} onLostPointerCaptureCapture={onTouchPointerEnd} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={() => { lastScreenRef.current = null }} onPointerUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={() => { if (state.dragging) cancel() }} onDoubleClick={onDoubleClick} onContextMenu={onContextMenu}
     onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragOver(true) } }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false) }}
     onDrop={(e) => { e.preventDefault(); setDragOver(false); setSelection(new Set()); addFiles(Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/')), toPointerInfo(e).world) }}>
     <canvas ref={staticRef} className="canvas static" /><canvas ref={interactiveRef} className="canvas interactive" />

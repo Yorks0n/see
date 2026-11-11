@@ -278,6 +278,33 @@ test('no-op changes clear pending status without writing an additional revision'
   assert.equal((await inspect('kv', 'canvas:no-op')).revision, revision)
 })
 
+test('local view saves persist without notifying sync subscribers, while content changes and deletion do', async () => {
+  const repo = new LocalRepository(), doc = canvas()
+  let changes = 0
+  const unsubscribe = repo.subscribe(() => { changes++ })
+  try {
+    await repo.save('board', doc)
+    assert.equal(changes, 1)
+    for (const camera of [{ x: 30, y: -40, zoom: 2 }, { x: 160, y: -90, zoom: 2 }]) {
+      doc.meta!.camera = camera
+      await repo.save('board', doc)
+      assert.deepEqual((await repo.load('board'))!.meta!.camera, camera)
+      assert.equal(changes, 1)
+    }
+    await repo.save('board', doc)
+    assert.equal(changes, 1)
+    doc.nodes![0].x += 40
+    await repo.save('board', doc)
+    assert.equal(changes, 2)
+    doc.meta!.name = 'renamed'
+    doc.meta!.camera = { x: 0, y: 0, zoom: 1 }
+    await repo.save('board', doc)
+    assert.equal(changes, 3)
+    await repo.delete('board')
+    assert.equal(changes, 4)
+  } finally { unsubscribe() }
+})
+
 test('a corrupt recovery journal is preserved and not silently discarded', async () => {
   localStorage.setItem(`${RECOVERY_PREFIX}bad`, '{broken')
   await assert.rejects(new LocalRepository().recover(localStorage))

@@ -45,8 +45,16 @@ test('client persists offline edits, merges after reconnect, retries races and p
     await cloud.syncNow()
     assert.equal(remote.get('board')!.revision, 1)
     assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+    const view = structuredClone(original)
+    view.meta!.camera = { x: 120, y: -80, zoom: 2 }
+    await repo.save('board', view)
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+    await cloud.syncNow()
+    assert.equal(remote.get('board')!.revision, 1)
+    assert.equal(remote.get('board')!.doc!.meta!.camera, undefined)
+    assert.deepEqual((await repo.load('board'))!.meta!.camera, view.meta!.camera)
     connected = false
-    const offline = structuredClone(original)
+    const offline = structuredClone(view)
     offline.nodes![0].x = 80
     await repo.save('board', offline)
     await cloud.syncNow()
@@ -57,6 +65,7 @@ test('client persists offline edits, merges after reconnect, retries races and p
     await cloud.syncNow()
     assert.equal(remote.get('board')!.doc!.nodes![0].x, 80)
     assert.equal((await repo.load('board'))!.meta!.name, 'renamed remotely')
+    assert.deepEqual((await repo.load('board'))!.meta!.camera, view.meta!.camera)
     connected = false
     const competing = (await repo.load('board'))!
     competing.meta = { name: 'offline name' }

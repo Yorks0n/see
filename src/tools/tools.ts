@@ -2,7 +2,7 @@ import { cameraStore } from '../store/camera'
 import { documentStore, uid } from '../store/document'
 import { preferencesStore } from '../store/preferences'
 import { hitTest } from '../render/renderer'
-import type { CanvasColor, CanvasNode, DrawNode, DrawPoint, GroupNode, ImageNode, RectangleNode, TextNode } from '../types'
+import type { CanvasColor, CanvasNode, DrawNode, DrawPoint, GroupNode, ImageNode, TextNode } from '../types'
 import { arrangement, type ArrangeMode } from './layout'
 
 export type ToolId = 'select' | 'box' | 'draw' | 'hand' | 'list' | 'rectangle' | 'laser'
@@ -421,24 +421,35 @@ export const tools: Record<ToolId, Tool> = {
   },
   rectangle: {
     id: 'rectangle',
-    onPointerDown(info, env, state) {
-      const node: RectangleNode = { id: uid(), type: 'rectangle', ...info.world, width: 160, height: 100 }
-      documentStore.addNode(node)
-      env.setSelection(new Set([node.id]))
-      state.dragging = { type: 'rectangle', startWorld: info.world, startScreen: info.screen, fromId: node.id, moved: false }
+    onPointerDown(info, _env, state) {
+      state.dragging = { type: 'rectangle', startWorld: info.world, startScreen: info.screen, moved: false }
     },
-    onPointerMove(info, _env, state) {
+    onPointerMove(info, env, state) {
       const d = state.dragging
-      if (d?.type !== 'rectangle' || !d.fromId) return
-      if (Math.hypot(info.screen.x - d.startScreen.x, info.screen.y - d.startScreen.y) > 3) d.moved = true
-      if (d.moved) documentStore.updateNode(d.fromId, {
+      if (d?.type !== 'rectangle') return
+      if (!d.moved && Math.hypot(info.screen.x - d.startScreen.x, info.screen.y - d.startScreen.y) <= 3) return
+      d.moved = true
+      const rect = {
         x: Math.min(d.startWorld.x, info.world.x), y: Math.min(d.startWorld.y, info.world.y),
         width: Math.max(8, Math.abs(info.world.x - d.startWorld.x)), height: Math.max(8, Math.abs(info.world.y - d.startWorld.y)),
-      })
+      }
+      if (d.fromId) documentStore.updateNode(d.fromId, rect)
+      else {
+        d.fromId = uid()
+        documentStore.addNode({ id: d.fromId, type: 'rectangle', ...rect })
+        env.setSelection(new Set([d.fromId]))
+      }
     },
     onPointerUp(info, env, state) {
       tools.rectangle.onPointerMove?.(info, env, state)
-      if (state.dragging?.fromId) updateMembership([state.dragging.fromId])
+      const d = state.dragging
+      if (d?.type !== 'rectangle') return
+      if (!d.fromId) {
+        d.fromId = uid()
+        documentStore.addNode({ id: d.fromId, type: 'rectangle', ...d.startWorld, width: 160, height: 100 })
+        env.setSelection(new Set([d.fromId]))
+      }
+      updateMembership([d.fromId])
       state.dragging = null
       env.setTool('select')
     },

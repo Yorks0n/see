@@ -12,6 +12,7 @@ import { resizeSelection, selectionBounds } from '../src/tools/resize'
 import { selectionSVG } from '../src/tools/export'
 import { SHORTCUTS } from '../src/shortcuts'
 import { LASER_LIFETIME, LaserTrail } from '../src/tools/laser'
+import { TouchNavigation } from '../src/tools/touchNavigation'
 import { deleteLocalFile, importCanvasFile, initializeLocal, loadLocal, saveCanvas, saveLocal, saveRecovery, setActiveFile } from '../src/persistence'
 import { LIBRARY_KEY, LibraryStore } from '../src/store/library'
 import { cropImage, uncroppedBounds, type CropHandle } from '../src/tools/imageCrop'
@@ -31,6 +32,74 @@ function environment(selection = new Set<string>()): ToolEnv {
   const env: ToolEnv = { selection, setSelection: (next) => { env.selection = next }, selectionOutline: false, setSelectionOutline: (outline) => { env.selectionOutline = outline }, setDragPreview: () => {}, setMarquee: () => {}, setPaintTrail: () => {}, addLaserPoint: () => {}, setEditingId: () => {}, setTool: () => {}, drawStyle: { color: '5', strokeWidth: 4 } }
   return env
 }
+
+test('two touch pointers pan and zoom around their moving midpoint', () => {
+  const touch = new TouchNavigation(), camera = { x: 40, y: -20, zoom: 0.5 }
+  touch.start(1, { x: 100, y: 100 }, camera)
+  assert.equal(touch.active, false)
+  // The first finger may already have moved before the second lands.
+  assert.equal(touch.move(1, { x: 120, y: 100 }), null)
+  touch.start(2, { x: 220, y: 100 }, camera)
+  assert.equal(touch.active, true)
+  const next = touch.move(2, { x: 320, y: 100 })!
+  assert.equal(next.zoom, 1)
+  assert.equal((220 - next.x) / next.zoom, (170 - camera.x) / camera.zoom)
+  assert.equal((100 - next.y) / next.zoom, (100 - camera.y) / camera.zoom)
+  touch.move(1, { x: 150, y: 140 })
+  const translated = touch.move(2, { x: 350, y: 140 })!
+  assert.deepEqual(translated, { x: next.x + 30, y: next.y + 40, zoom: 1 })
+  assert.equal(touch.move(99, { x: 0, y: 0 }), null)
+})
+
+test('touch zoom limits keep the original world point under the midpoint', () => {
+  for (const [distance, expected] of [[1, 0.2], [1000, 3]]) {
+    const touch = new TouchNavigation(), camera = { x: -80, y: 50, zoom: 1 }
+    touch.start(1, { x: 100, y: 100 }, camera)
+    touch.start(2, { x: 200, y: 100 }, camera)
+    const next = touch.move(2, { x: 100 + distance, y: 100 })!
+    assert.equal(next.zoom, expected)
+    assert.equal((100 + distance / 2 - next.x) / next.zoom, 150 - camera.x)
+    assert.equal((100 - next.y) / next.zoom, 100 - camera.y)
+  }
+  const touch = new TouchNavigation(), camera = { x: 0, y: 0, zoom: 1 }
+  touch.start(1, { x: 100, y: 100 }, camera)
+  touch.start(2, { x: 100, y: 100 }, camera)
+  const next = touch.move(2, { x: 120, y: 100 })!
+  assert.ok(Object.values(next).every(Number.isFinite))
+})
+
+test('lifting or cancelling one finger suppresses tool input until all touches end', () => {
+  const touch = new TouchNavigation(), camera = { x: 0, y: 0, zoom: 1 }
+  touch.start(1, { x: 100, y: 100 }, camera)
+  touch.start(2, { x: 200, y: 100 }, camera)
+  const next = touch.move(2, { x: 250, y: 100 })!
+  assert.equal(touch.end(2, next), true)
+  assert.equal(touch.active, true)
+  assert.equal(touch.move(1, { x: 400, y: 200 }), null)
+  assert.equal(touch.end(2, next), false) // Automatic capture loss after pointerup.
+  touch.start(3, { x: 500, y: 200 }, next)
+  assert.deepEqual(touch.move(3, { x: 500, y: 200 }), next)
+  assert.equal(touch.end(1, next), true)
+  assert.equal(touch.end(3, next), true)
+  assert.equal(touch.active, false)
+  assert.equal(touch.size, 0)
+  touch.start(4, { x: 10, y: 10 }, next)
+  assert.equal(touch.active, false)
+  assert.equal(touch.end(4, next), false)
+})
+
+test('adding and replacing a third touch rebases navigation without a camera jump', () => {
+  const touch = new TouchNavigation(), camera = { x: 20, y: -10, zoom: 1 }
+  touch.start(1, { x: 100, y: 100 }, camera)
+  touch.start(2, { x: 200, y: 100 }, camera)
+  const next = touch.move(2, { x: 250, y: 100 })!
+  touch.start(3, { x: 400, y: 200 }, next)
+  assert.deepEqual(touch.move(3, { x: 450, y: 200 }), next)
+  assert.equal(touch.end(1, next), true)
+  assert.deepEqual(touch.move(2, { x: 250, y: 100 }), next)
+  const moved = touch.move(3, { x: 500, y: 200 })!
+  assert.notDeepEqual(moved, next)
+})
 
 test('laser gestures leave document, selection and undo history untouched and separate strokes', () => {
   documentStore.load({ nodes: [card('a')] })
@@ -67,6 +136,25 @@ test('laser points expire independently and cancellation clears all trails', () 
   assert.equal(trail.points.length, 0)
   assert.equal(SHORTCUTS.find((s) => s.id === 'laser')?.keys, 'K')
   assert.equal(SHORTCUTS.find((s) => s.id === 'list')?.keys, 'L')
+})
+
+test('rectangle waits for a drag before showing a shape at the dragged size', () => {
+  documentStore.load({ nodes: [card('existing')] })
+  const before = documentStore.toJSON(), env = environment(new Set(['existing'])), state = new ToolState()
+  documentStore.beginInteraction()
+  tools.rectangle.onPointerDown!(pointer(300, 240), env, state)
+  assert.deepEqual(documentStore.toJSON(), before)
+  assert.deepEqual([...env.selection], ['existing'])
+  tools.rectangle.onPointerMove!(pointer(302, 241), env, state)
+  assert.deepEqual(documentStore.toJSON(), before)
+  tools.rectangle.onPointerMove!(pointer(280, 230), env, state)
+  const shape = documentStore.getNode([...env.selection][0])!
+  assert.deepEqual([shape.x, shape.y, shape.width, shape.height], [280, 230, 20, 10])
+  tools.rectangle.onPointerMove!(pointer(250, 210), env, state)
+  assert.equal(documentStore.getSnapshot().nodes!.length, 2)
+  assert.equal(documentStore.getNode(shape.id)!.width, 50)
+  documentStore.cancelInteraction()
+  assert.deepEqual(documentStore.toJSON(), before)
 })
 
 test('rectangle tool creates click and reverse-drag shapes, moves independently, and supports cancel and undo', () => {

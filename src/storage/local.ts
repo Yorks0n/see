@@ -1,5 +1,5 @@
 import type { CanvasFile, CanvasNode } from '../types'
-import type { SyncBase } from '../sync/protocol'
+import { cloudCanvas, equal, type SyncBase } from '../sync/protocol'
 
 export const DATABASE_NAME = 'whiteboard-db'
 export const RECOVERY_PREFIX = 'see-local-recovery:'
@@ -192,7 +192,7 @@ export class LocalRepository {
     return this.enqueue(async () => {
       const prepared = await this.prepare(snapshot)
       const expected = this.revisions.get(id) ?? 0
-      const revision = await this.transaction<number>(['kv', 'assets'], 'readwrite', (tx, done, fail) => {
+      const saved = await this.transaction<{ revision: number; contentChanged: boolean }>(['kv', 'assets'], 'readwrite', (tx, done, fail) => {
         const store = tx.objectStore('kv'), request = store.get(`canvas:${id}`)
         request.onsuccess = () => {
           try {
@@ -204,7 +204,7 @@ export class LocalRepository {
             mapMedia(prepared.doc, (url) => { if (url.startsWith(ASSET_PREFIX) && !prepared.assets.has(url)) refs.add(url); return url })
             const commit = () => {
               store.put({ schemaVersion: 1, revision: next, savedAt: Date.now(), doc: prepared.doc } satisfies StoredCanvas, `canvas:${id}`)
-              done(next)
+              done({ revision: next, contentChanged: !equal(cloudCanvas(current?.doc ?? null), cloudCanvas(prepared.doc)) })
             }
             if (!refs.size) commit()
             let remaining = refs.size
@@ -220,8 +220,9 @@ export class LocalRepository {
           } catch (error) { fail(error as Error) }
         }
       })
-      this.revisions.set(id, revision)
-      this.notify()
+      this.revisions.set(id, saved.revision)
+      // View changes are persisted locally without scheduling a cloud sync.
+      if (saved.contentChanged) this.notify()
       prepared.replacements.forEach((ref, url) => this.media.set(url, ref))
       // Keep a newer pagehide journal until that exact snapshot has committed.
       try {
