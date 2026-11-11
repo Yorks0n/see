@@ -2,6 +2,7 @@ import type { Camera } from '../store/camera'
 import type { CanvasColor, CanvasEdge, CanvasFile, CanvasNode, DrawPoint, NodeSide } from '../types'
 import type { DrawStyle } from '../tools/tools'
 import type { Rect } from '../hit/grid'
+import { inViewport } from './viewport'
 
 export const PRESET_COLORS: Record<string, string> = { '1': '#e76d77', '2': '#df9451', '3': '#d5b43c', '4': '#69a780', '5': '#609fbb', '6': '#8b78cb' }
 export const COLOR_NAMES: Record<string, string> = { '1': '珊瑚红', '2': '杏橙', '3': '暖黄', '4': '苔绿', '5': '湖蓝', '6': '鸢尾紫' }
@@ -109,7 +110,7 @@ export function renderStaticScene(ctx: CanvasRenderingContext2D, env: RenderEnv,
   ctx.fillRect(0, 0, width, height)
   ctx.setTransform(dpr * camera.zoom, 0, 0, dpr * camera.zoom, dpr * camera.x, dpr * camera.y)
   for (const n of doc.nodes ?? []) {
-    if (n.type !== 'group') continue
+    if (n.type !== 'group' || !inViewport(n, camera, { width, height })) continue
     const color = resolveColor(n.color, '#9b95ab')
     ctx.globalAlpha = 0.07
     ctx.fillStyle = color

@@ -70,6 +70,9 @@ export async function portableCanvas(doc: CanvasFile): Promise<CanvasFile> {
 export class LocalRepository {
   private revisions = new Map<string, number>()
   private media = new Map<string, string>()
+  // Reuse URLs across file switches. Undo and the internal clipboard may still
+  // reference a previously opened board's media for the lifetime of this tab.
+  private assetURLs = new Map<string, string>()
   private tail: Promise<unknown> = Promise.resolve()
   private writer = crypto.randomUUID()
   private listeners = new Set<() => void>()
@@ -148,12 +151,15 @@ export class LocalRepository {
     mapMedia(doc, (url) => { if (url.startsWith(ASSET_PREFIX)) refs.add(url); return url })
     const replacements = new Map<string, string>()
     await Promise.all([...refs].map(async (ref) => {
+      const cached = this.assetURLs.get(ref)
+      if (cached) { replacements.set(ref, cached); return }
       const blob = await this.transaction<Blob | undefined>(['assets'], 'readonly', (tx, done) => {
         const request = tx.objectStore('assets').get(ref)
         request.onsuccess = () => done(request.result)
       })
       if (!blob) throw new Error('白板的本地附件缺失，已停止加载以避免保存不完整内容。')
-      const url = await dataURL(blob)
+      const url = URL.createObjectURL(blob)
+      this.assetURLs.set(ref, url)
       replacements.set(ref, url)
       this.media.set(url, ref)
     }))
@@ -163,7 +169,6 @@ export class LocalRepository {
   async load(id: string): Promise<CanvasFile | null> {
     await this.tail
     const saved = await this.read(id)
-    this.media.clear()
     const doc = saved?.doc ? await this.hydrate(saved.doc) : null
     this.revisions.set(id, saved?.revision ?? 0)
     return doc
@@ -188,7 +193,7 @@ export class LocalRepository {
 
   save(id: string, doc: CanvasFile): Promise<void> {
     // Capture before any await; a file switch must never change the target or contents.
-    const snapshot = structuredClone(doc)
+    const snapshot = structuredClone(this.compact(doc))
     return this.enqueue(async () => {
       const prepared = await this.prepare(snapshot)
       const expected = this.revisions.get(id) ?? 0

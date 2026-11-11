@@ -14,6 +14,7 @@ import { SHORTCUTS } from '../src/shortcuts'
 import { LASER_LIFETIME, LaserTrail } from '../src/tools/laser'
 import { TouchNavigation } from '../src/tools/touchNavigation'
 import { editingCamera } from '../src/render/editing'
+import { inViewport } from '../src/render/viewport'
 import { deleteLocalFile, importCanvasFile, initializeLocal, loadLocal, saveCanvas, saveLocal, saveRecovery, setActiveFile } from '../src/persistence'
 import { LIBRARY_KEY, LibraryStore } from '../src/store/library'
 import { cropImage, uncroppedBounds, type CropHandle } from '../src/tools/imageCrop'
@@ -1169,6 +1170,23 @@ test('text and connection defaults persist independently, migrate legacy color, 
     preferencesStore.setConnectionColor(previousColors.connectionColor)
     if (previous === undefined) delete (globalThis as any).localStorage
     else Object.defineProperty(globalThis, 'localStorage', previous)
+  }
+})
+
+test('viewport culling retains crossing images and nearby annotations across pan, zoom and resize', () => {
+  const size = { width: 1000, height: 600 }
+  for (const zoom of [0.2, 1, 3]) {
+    const camera = { x: 400, y: -200, zoom }
+    const world = (left: number, top: number, width: number, height: number) => ({ x: (left - camera.x) / zoom, y: (top - camera.y) / zoom, width: width / zoom, height: height / zoom })
+    assert.equal(inViewport(world(100, 100, 300, 200), camera, size), true)
+    assert.equal(inViewport(world(-2000, -2000, 4000, 4000), camera, size), true)
+    assert.equal(inViewport(world(-150, 100, 1, 1), camera, size), true)
+    assert.equal(inViewport(world(1100, 100, 100, 100), camera, size), true)
+    assert.equal(inViewport(world(1200, 100, 100, 100), camera, size), false)
+    assert.equal(inViewport(world(1200, 100, 100, 100), camera, { width: 1400, height: 600 }), true)
+    assert.equal(inViewport(world(-300, 100, 100, 100), camera, size), false)
+    assert.equal(inViewport(world(100, 800, 100, 100), camera, size), false)
+    assert.equal(inViewport(world(100, -300, 100, 100), camera, size), false)
   }
 })
 

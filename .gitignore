@@ -5,3 +5,6 @@ dist/
 .dev.vars.*
 .env.local
 .cloud-login.txt
+*.tldr
+*.canvas
+.local-data/

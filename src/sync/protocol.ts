@@ -1,9 +1,65 @@
-import type { CanvasFile, CanvasNode } from '../types'
+import type { CanvasEdge, CanvasFile, CanvasNode } from '../types'
 
 export interface CloudBoard { id: string; revision: number; doc: CanvasFile | null }
 export interface SyncBase { revision: number; doc: CanvasFile | null }
 export const ASSET_PREFIX = 'see-asset:'
 export const PART_SIZE = 8 * 1024 * 1024
+
+interface RecordChanges<T> { upsert: T[]; remove: string[]; order?: string[] }
+export interface CanvasChanges {
+  nodes: RecordChanges<CanvasNode>
+  edges: RecordChanges<CanvasEdge>
+  meta?: CanvasFile['meta']
+}
+
+function recordChanges<T extends { id: string }>(base: T[], next: T[]): RecordChanges<T> {
+  const old = new Map(base.map((item) => [item.id, item])), ids = new Set(next.map((item) => item.id))
+  const order = next.map((item) => item.id)
+  return {
+    upsert: next.filter((item) => !equal(old.get(item.id), item)),
+    remove: base.filter((item) => !ids.has(item.id)).map((item) => item.id),
+    ...(!equal(base.map((item) => item.id), order) ? { order } : {}),
+  }
+}
+export function canvasChanges(base: CanvasFile, next: CanvasFile): CanvasChanges {
+  return {
+    nodes: recordChanges(base.nodes ?? [], next.nodes ?? []),
+    edges: recordChanges(base.edges ?? [], next.edges ?? []),
+    ...(!equal(base.meta, next.meta) ? { meta: next.meta ?? {} } : {}),
+  }
+}
+export function applyCanvasChanges(base: CanvasFile, changes: unknown): CanvasFile {
+  const patch = changes as CanvasChanges
+  function applyRecords<T extends { id: string }>(items: T[], change: RecordChanges<T>): T[] {
+    if (!change || !Array.isArray(change.upsert) || !Array.isArray(change.remove)) throw new Error('无效的白板修改')
+    const updated = new Map(items.map((item) => [item.id, item]))
+    const seen = new Set<string>()
+    for (const id of change.remove) {
+      if (typeof id !== 'string' || seen.has(id)) throw new Error('无效的白板修改')
+      seen.add(id); updated.delete(id)
+    }
+    for (const item of change.upsert) {
+      if (!item || typeof item.id !== 'string' || seen.has(item.id)) throw new Error('无效的白板修改')
+      seen.add(item.id); updated.set(item.id, item)
+    }
+    if (change.order === undefined) return [...updated.values()]
+    if (!Array.isArray(change.order) || change.order.length !== updated.size || new Set(change.order).size !== updated.size || change.order.some((id) => !updated.has(id))) throw new Error('无效的白板顺序')
+    return change.order.map((id) => updated.get(id)!)
+  }
+  if (!patch || typeof patch !== 'object' || (patch.meta !== undefined && (!patch.meta || typeof patch.meta !== 'object' || Array.isArray(patch.meta)))) throw new Error('无效的白板修改')
+  const doc = {
+    ...base,
+    nodes: applyRecords(base.nodes ?? [], patch.nodes),
+    edges: applyRecords(base.edges ?? [], patch.edges),
+    ...(patch.meta !== undefined ? { meta: patch.meta } : {}),
+  }
+  if (!validateCanvas(doc)) throw new Error('无效的白板数据')
+  return doc
+}
+
+export function validAssetMime(mime: unknown): mime is string {
+  return typeof mime === 'string' && mime.length <= 256 && /^[\w.+-]+\/[\w.+-]+(?:;[ \t]*[\w-]+=(?:[\w.+-]+|"[^"\r\n]*"))*$/.test(mime)
+}
 
 export function cloudCanvas(doc: CanvasFile | null): CanvasFile | null {
   if (!doc) return null

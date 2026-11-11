@@ -3,10 +3,11 @@ import { cameraStore } from './store/camera'
 import { LocalRepository, portableCanvas, StorageConflictError } from './storage/local'
 import type { CanvasFile } from './types'
 import { importTldraw } from './tools/tldraw'
+import { equal } from './sync/protocol'
 
 export const localRepository = new LocalRepository()
 let activeFileId = 'legacy-default'
-const savedDocuments = new Map<string, string>()
+const savedDocuments = new Map<string, CanvasFile>()
 const pendingSaves = new Map<string, Promise<void>>()
 type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict'
 let status: { state: SaveState; message: string; viewOnly: boolean } = { state: 'saved', message: '', viewOnly: false }
@@ -20,13 +21,12 @@ export const persistenceStore = {
   getSnapshot: () => status,
 }
 function currentCanvas(): CanvasFile {
-  const doc = documentStore.toJSON()
-  doc.meta = { ...doc.meta, camera: cameraStore.getSnapshot() }
-  return doc
+  const doc = documentStore.getSnapshot()
+  return { ...doc, meta: { ...doc.meta, camera: cameraStore.getSnapshot() } }
 }
 export function setActiveFile(id: string) { activeFileId = id; savedDocuments.clear(); publish('saved') }
 export function markLoaded() {
-  savedDocuments.set(activeFileId, JSON.stringify(currentCanvas()))
+  savedDocuments.set(activeFileId, currentCanvas())
   publish('saved')
 }
 export function markDirty(viewOnly = false) {
@@ -39,7 +39,7 @@ export function reportSaveError(error: unknown) {
   publish(error instanceof StorageConflictError ? 'conflict' : 'error', message)
 }
 export function saveRecovery() {
-  if (savedDocuments.get(activeFileId) === JSON.stringify(currentCanvas())) return
+  if (equal(savedDocuments.get(activeFileId), currentCanvas())) return
   try { localRepository.journal(activeFileId, currentCanvas()) }
   catch (error) { reportSaveError(error) }
 }
@@ -54,24 +54,24 @@ export function saveLocal(): Promise<void> {
 async function flushLocal(id: string): Promise<void> {
   // Include edits made while an earlier transaction was committing before switching files.
   do {
-    const doc = currentCanvas(), serialized = JSON.stringify(doc)
-    if (savedDocuments.get(id) === serialized) {
+    const doc = currentCanvas()
+    if (equal(savedDocuments.get(id), doc)) {
       if (id === activeFileId) publish('saved')
       return
     }
     publish('saving', '', status.viewOnly)
     try {
       await localRepository.save(id, doc)
-      savedDocuments.set(id, serialized)
+      savedDocuments.set(id, doc)
       if (id === activeFileId) {
-        const saved = serialized === JSON.stringify(currentCanvas())
+        const saved = equal(doc, currentCanvas())
         publish(saved ? 'saved' : 'dirty', '', !saved && status.viewOnly)
       }
     } catch (error) {
       if (id === activeFileId) { saveRecovery(); reportSaveError(error) }
       throw error
     }
-  } while (id === activeFileId && savedDocuments.get(id) !== JSON.stringify(currentCanvas()))
+  } while (id === activeFileId && !equal(savedDocuments.get(id), currentCanvas()))
 }
 export function saveCanvas(id: string, doc: CanvasFile) { return localRepository.save(id, doc) }
 export function loadLocal(id = activeFileId) { return localRepository.load(id) }

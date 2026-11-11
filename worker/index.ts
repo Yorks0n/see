@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
-import { assetRefs, PART_SIZE, validateCanvas } from '../src/sync/protocol'
+import { applyCanvasChanges, assetRefs, PART_SIZE, validAssetMime, validateCanvas } from '../src/sync/protocol'
 
 interface Env {
   VAULT: DurableObjectNamespace<SeeVault>
@@ -100,26 +100,32 @@ export class SeeVault extends DurableObject<Env> {
   }
   private async saveBoard(request: Request, id: string) {
     const input = await body(request)
-    if (!Number.isSafeInteger(input.baseRevision) || input.baseRevision < 0 || !validateCanvas(input.doc)) throw new HttpError(400, '无效的白板数据')
-    for (const ref of assetRefs(input.doc)) {
-      if (!this.sql.exec('SELECT hash FROM assets WHERE hash = ?', ref).toArray().length) throw new HttpError(409, '附件尚未上传完成')
-    }
+    if (!Number.isSafeInteger(input.baseRevision) || input.baseRevision < 0) throw new HttpError(400, '无效的白板数据')
     // There are no awaits between checking the revision and committing the transaction.
     return this.ctx.storage.transactionSync(() => {
       const current = this.getBoard(id)
       if (current.revision !== input.baseRevision) return json({ error: '白板已有更新', current }, 409)
+      if (request.method === 'PATCH') {
+        if (!current.doc) return json({ error: '白板已删除或不存在', current }, 409)
+        try { input.doc = applyCanvasChanges(current.doc, input.changes) }
+        catch { throw new HttpError(400, '无效的白板修改') }
+      }
+      if (!validateCanvas(input.doc)) throw new HttpError(400, '无效的白板数据')
+      for (const ref of assetRefs(input.doc)) {
+        if (!this.sql.exec('SELECT hash FROM assets WHERE hash = ?', ref).toArray().length) throw new HttpError(409, '附件尚未上传完成')
+      }
       if (current.revision && current.doc === null && input.doc !== null) return json({ error: '白板已删除，请另存副本', current }, 409)
       if (JSON.stringify(current.doc) === JSON.stringify(input.doc)) return json(current)
       const revision = current.revision + 1, updated = Date.now(), serialized = JSON.stringify(input.doc)
       this.sql.exec('INSERT INTO boards VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, doc = excluded.doc, updated = excluded.updated', id, revision, serialized, updated)
       this.sql.exec('INSERT INTO history VALUES (?, ?, ?, ?)', id, revision, serialized, updated)
       this.sql.exec('DELETE FROM history WHERE id = ? AND revision <= ?', id, revision - 50)
-      return json({ id, revision, doc: input.doc })
+      return json({ id, revision, ...(request.method === 'PATCH' ? {} : { doc: input.doc }) })
     })
   }
   private async startUpload(request: Request) {
     const input = await body(request, 4096)
-    if (!/^[a-f0-9]{64}$/.test(input.hash) || typeof input.mime !== 'string' || !/^[\w.+-]+\/[\w.+-]+$/.test(input.mime) || !Number.isSafeInteger(input.size) || input.size < 1 || input.size > 512 * 1024 * 1024) throw new HttpError(400, '无效的附件（最大 512 MB）')
+    if (!/^[a-f0-9]{64}$/.test(input.hash) || !validAssetMime(input.mime) || !Number.isSafeInteger(input.size) || input.size < 1 || input.size > 512 * 1024 * 1024) throw new HttpError(400, '无效的附件（最大 512 MB）')
     if (this.sql.exec('SELECT hash FROM assets WHERE hash = ?', input.hash).toArray().length) return json({ complete: true })
     let row = this.sql.exec<UploadRow>('SELECT * FROM uploads WHERE hash = ?', input.hash).toArray()[0]
     if (!row) {
@@ -193,7 +199,7 @@ export class SeeVault extends DurableObject<Env> {
       if (path[1] === 'config' && method === 'GET') return json({ available: true, configured: !!this.env.PASSWORD_HASH })
       if (path[1] === 'login' && method === 'POST') return await this.login(request)
       const token = await this.authenticate(request)
-      if (path[1] === 'session' && method === 'GET') return json({ vaultId: this.vaultId, username: this.env.USERNAME })
+      if (path[1] === 'session' && method === 'GET') return json({ vaultId: this.vaultId, username: this.env.USERNAME, changes: true })
       if (path[1] === 'logout' && method === 'POST') { this.sql.exec('DELETE FROM sessions WHERE token = ?', token); return json({ ok: true }) }
       if (path[1] === 'boards') {
         const id = path[2]
@@ -206,7 +212,7 @@ export class SeeVault extends DurableObject<Env> {
           return json({ id, revision: row.revision, doc: JSON.parse(row.doc) })
         }
         if (method === 'GET') return json(this.getBoard(id))
-        if (method === 'PUT') return await this.saveBoard(request, id)
+        if (method === 'PUT' || method === 'PATCH') return await this.saveBoard(request, id)
       }
       if (path[1] === 'uploads') {
         if (!path[2] && method === 'POST') return await this.startUpload(request)
@@ -243,7 +249,7 @@ export default {
     if (origin) {
       headers.set('Access-Control-Allow-Origin', origin)
       headers.set('Vary', 'Origin')
-      headers.set('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, OPTIONS')
+      headers.set('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, PATCH, OPTIONS')
       headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Content-SHA256')
     }
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers })

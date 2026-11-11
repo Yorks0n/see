@@ -102,9 +102,11 @@ export class LibraryStore {
     const file = { id: uid(), name }
     const doc = content ? { ...content, meta: { ...content.meta, name } } : { nodes: [], edges: [], meta: { name } }
     await saveCanvas(file.id, doc)
+    const loaded = await loadLocal(file.id)
+    if (!loaded) throw new Error('无法读取白板，请重试')
     setActiveFile(file.id)
     this.emit({ files: [...this.state.files, file], activeFileId: file.id })
-    this.applyDocument(doc)
+    this.applyDocument(loaded)
     this.persist()
     return file
   }

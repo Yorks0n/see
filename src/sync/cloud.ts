@@ -1,4 +1,4 @@
-import { assetRefs, cloudCanvas, equal, mergeCanvas, PART_SIZE, type CloudBoard } from './protocol'
+import { assetRefs, canvasChanges, cloudCanvas, equal, mergeCanvas, PART_SIZE, type CloudBoard } from './protocol'
 import { LocalRepository, StorageConflictError } from '../storage/local'
 import type { CanvasFile } from '../types'
 
@@ -22,6 +22,7 @@ let apply: ((action: () => Promise<void>) => Promise<boolean>) | null = null
 let running: Promise<void> | null = null
 let timer: ReturnType<typeof setTimeout> | null = null
 let localGeneration = 0
+const uploadedAssets = new Set<string>()
 
 function endpoint(value: string) {
   const url = new URL(value || location.origin)
@@ -88,12 +89,27 @@ async function downloadAssets(active: Session, doc: CanvasFile | null) {
     await repository!.cacheAsset(ref, await response.blob())
   }
 }
-async function send(active: Session, board: CloudBoard) {
-  for (const ref of assetRefs(board.doc)) await uploadAsset(active, ref)
-  return await (await api(active, `boards/${encodeURIComponent(board.id)}`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ baseRevision: board.revision, doc: board.doc }),
-  })).json() as CloudBoard
+async function send(active: Session, board: CloudBoard, remote: CloudBoard, supportsChanges: boolean) {
+  const known = new Set(assetRefs(remote.doc)), key = `${active.endpoint}:${active.vaultId}:`
+  const missing = assetRefs(board.doc).filter((ref) => !known.has(ref) && !uploadedAssets.has(key + ref))
+  let cursor = 0, completed = 0
+  const uploads = await Promise.allSettled(Array.from({ length: Math.min(3, missing.length) }, async () => {
+    while (cursor < missing.length) {
+      const ref = missing[cursor++]
+      publish({ state: 'syncing', message: `正在上传附件 ${completed}/${missing.length}` })
+      await uploadAsset(active, ref)
+      uploadedAssets.add(key + ref)
+      publish({ state: 'syncing', message: `正在上传附件 ${++completed}/${missing.length}` })
+    }
+  }))
+  const failure = uploads.find((result) => result.status === 'rejected')
+  if (failure?.status === 'rejected') throw failure.reason
+  const incremental = supportsChanges && remote.doc !== null && board.doc !== null
+  const result = await (await api(active, `boards/${encodeURIComponent(board.id)}`, {
+    method: incremental ? 'PATCH' : 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseRevision: board.revision, ...(incremental ? { changes: canvasChanges(remote.doc!, board.doc!) } : { doc: board.doc }) }),
+  })).json()
+  return { ...result, doc: result.doc === undefined ? board.doc : result.doc } as CloudBoard
 }
 function schedule(delay = 500) {
   if (timer) clearTimeout(timer)
@@ -160,7 +176,7 @@ async function synchronize(active: Session) {
     }
     let result = remote
     if (!equal(merged.doc, remote.doc)) {
-      try { result = await send(active, { id, revision: remote.revision, doc: merged.doc }) }
+      try { result = await send(active, { id, revision: remote.revision, doc: merged.doc }, remote, currentSession.changes === true) }
       catch (error) {
         if (error instanceof ApiError && error.status === 409 && error.current) { pending = true; continue }
         throw error

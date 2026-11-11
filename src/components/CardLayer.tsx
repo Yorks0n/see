@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLineDown, ArrowLineUp, Copy, Crop, File, Link, PencilSimple, SquaresFour, TextT, Trash, SelectionSlash, SplitVertical, List } from './icons'
 import type { Camera } from '../store/camera'
 import { documentStore } from '../store/document'
@@ -10,9 +10,11 @@ import { StylePalette } from './StylePalette'
 import { ResizeHandles } from './ResizeHandles'
 import { TextEditor } from './TextEditor'
 import { ArrangeMenu } from './ArrangeMenu'
+import { inViewport } from '../render/viewport'
 
 export function CardLayer(props: {
   doc: CanvasFile; camera: Camera; selection: Set<string>; setSelection: (s: Set<string>) => void
+  viewportSize: { width: number; height: number }
   selectionOutline: boolean
   editingId: string | null; setEditingId: (id: string | null) => void; tool: ToolId
   onTextEditDone: (id: string, text: string) => void
@@ -23,11 +25,12 @@ export function CardLayer(props: {
   const [captionDraft, setCaptionDraft] = useState<{ id: string; text: string } | null>(null)
   const selectedNodes = (doc.nodes ?? []).filter((n) => selection.has(n.id))
   const active = props.tool === 'select'
-  const connected = new Set((doc.edges ?? []).flatMap((e) => [e.fromNode, e.toNode]))
+  const connected = useMemo(() => new Set((doc.edges ?? []).flatMap((e) => [e.fromNode, e.toNode])), [doc.edges])
   const multiple = props.selectionOutline && selectedNodes.length > 1
   return <div className={`card-layer ${active ? '' : 'pass-through'} ${multiple ? 'multi-selection' : ''}`}>
     {(doc.nodes ?? []).map((node) => {
       const selected = selection.has(node.id), editing = props.editingId === node.id
+      if (!editing && props.cropId !== node.id && !inViewport(node, camera, props.viewportSize)) return null
       if (node.type === 'rectangle') return <svg key={node.id} className={`rectangle-block ${selected ? 'selected' : ''}`} data-node-id={node.id} aria-label="矩形" style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
         <g transform={`scale(${camera.zoom})`}>
           {selected && !multiple && <rect className="rectangle-selection" width={node.width} height={node.height} strokeWidth={2 + 6 / camera.zoom} />}
@@ -35,13 +38,7 @@ export function CardLayer(props: {
           <rect className="rectangle-hit" width={node.width} height={node.height} strokeWidth={2 + 14 / camera.zoom} />
         </g>
       </svg>
-      if (node.type === 'draw') return <svg key={node.id} className={`draw-block ${selected ? 'selected' : ''}`} data-node-id={node.id} aria-label="手绘笔迹" style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
-        <g transform={`scale(${camera.zoom})`}>
-          {selected && !multiple && <path className="draw-selection" d={strokePath(node.points)} strokeWidth={(node.strokeWidth ?? 3) + 10 / camera.zoom} />}
-          <path className="draw-line" d={strokePath(node.points)} stroke={resolveColor(node.color, '#44434d')} strokeWidth={node.strokeWidth ?? 3} />
-          <path className="draw-hit" d={strokePath(node.points)} strokeWidth={(node.strokeWidth ?? 3) + 14 / camera.zoom} />
-        </g>
-      </svg>
+      if (node.type === 'draw') return <DrawBlock key={node.id} node={node} camera={camera} selected={selected} multiple={multiple} />
       if (node.type === 'group') return <div key={node.id} className={`group-label ${node.layout === 'list' ? 'list-label' : ''} ${selected ? 'selected' : ''}`} data-node-id={node.id} style={{ left: node.x * camera.zoom + camera.x + (node.layout === 'list' ? 12 * camera.zoom : 0), top: node.y * camera.zoom + camera.y + (node.layout === 'list' ? 8 * camera.zoom : -29), maxWidth: node.width * camera.zoom - (node.layout === 'list' ? 24 * camera.zoom : 0), color: resolveColor(node.color, '#8c8599') }} onDoubleClick={(e) => { e.stopPropagation(); props.setEditingId(node.id) }}>
         {node.layout === 'list' ? <List size={15} /> : <SquaresFour size={15} />}<EditableText text={node.label || (node.layout === 'list' ? '列表' : '分组')} editing={editing} className="group-name" onDone={(label) => { documentStore.updateNode(node.id, { label }); props.setEditingId(null) }} />
       </div>
@@ -55,6 +52,16 @@ export function CardLayer(props: {
     {active && !props.interacting && selectedNodes.length > 0 && (props.editingId === null || (selectedNodes.length === 1 && selectedNodes[0].type === 'image')) && <SelectionBar {...props} nodes={selectedNodes} captionDraft={captionDraft} />}
     {active && props.editingId === null && !props.cropId && !props.interacting && (selectedNodes.length === 1 || multiple) && <ResizeHandles nodes={selectedNodes} camera={camera} />}
   </div>
+}
+function DrawBlock({ node, camera, selected, multiple }: { node: Extract<CanvasNode, { type: 'draw' }>; camera: Camera; selected: boolean; multiple: boolean }) {
+  const path = useMemo(() => strokePath(node.points), [node.points])
+  return <svg className={`draw-block ${selected ? 'selected' : ''}`} data-node-id={node.id} aria-label="手绘笔迹" style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
+    <g transform={`scale(${camera.zoom})`}>
+      {selected && !multiple && <path className="draw-selection" d={path} strokeWidth={(node.strokeWidth ?? 3) + 10 / camera.zoom} />}
+      <path className="draw-line" d={path} stroke={resolveColor(node.color, '#44434d')} strokeWidth={node.strokeWidth ?? 3} />
+      <path className="draw-hit" d={path} strokeWidth={(node.strokeWidth ?? 3) + 14 / camera.zoom} />
+    </g>
+  </svg>
 }
 function SelectionBar(props: Parameters<typeof CardLayer>[0] & { nodes: CanvasNode[]; captionDraft: { id: string; text: string } | null }) {
   const { nodes, camera } = props
@@ -137,7 +144,7 @@ function ImageCard({ node, camera, selected, editing, draft, onInput, onDone, on
   const [failed, setFailed] = useState(false)
   const crop = node.crop ?? { x: 0, y: 0, width: 1, height: 1 }
   return <div className={`card image-card ${selected ? 'selected' : ''}`} onDoubleClick={(e) => { e.stopPropagation(); onCrop() }}>
-    <div className="image-viewport"><img src={node.url} alt={node.text || '白板图片'} draggable={false} style={{ width: `${100 / crop.width}%`, height: `${100 / crop.height}%`, left: `${-crop.x / crop.width * 100}%`, top: `${-crop.y / crop.height * 100}%` }} onError={() => setFailed(true)} onLoad={(e) => {
+    <div className="image-viewport"><img src={node.url} alt={node.text || '白板图片'} decoding="async" draggable={false} style={{ width: `${100 / crop.width}%`, height: `${100 / crop.height}%`, left: `${-crop.x / crop.width * 100}%`, top: `${-crop.y / crop.height * 100}%` }} onError={() => setFailed(true)} onLoad={(e) => {
       setFailed(false)
       const img = e.currentTarget
       if (!node.naturalWidth && img.naturalWidth > 0) documentStore.initializeImage(node.id, img.naturalWidth, img.naturalHeight)

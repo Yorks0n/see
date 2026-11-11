@@ -147,7 +147,13 @@ test('reload preserves document properties, embedded images and group background
   assert.equal(stored.doc.nodes[1].url, stored.doc.nodes[2].background)
   assert.equal((await inspect('assets')).length, 1)
   assert.ok((await inspect('assets'))[0] instanceof Blob)
-  assert.deepEqual(await new LocalRepository().load('board'), doc)
+  const reopened = new LocalRepository()
+  const loaded = (await reopened.load('board'))!
+  assert.match((loaded.nodes![1] as any).url, /^blob:/)
+  assert.equal((loaded.nodes![1] as any).url, (loaded.nodes![2] as any).background)
+  assert.deepEqual(await portableCanvas(loaded), doc)
+  const reloaded = (await reopened.load('board'))!
+  assert.equal((reloaded.nodes![1] as any).url, (loaded.nodes![1] as any).url)
   assert.deepEqual(await new LocalRepository().list(), [{ id: 'board', name: 'original' }, { id: 'duplicate', name: 'original' }])
 })
 
@@ -158,9 +164,26 @@ test('a temporary blob URL survives reload after the source URL is revoked', asy
   const exported = await portableCanvas(doc)
   URL.revokeObjectURL(url)
   const restored = await new LocalRepository().load('blob')
-  assert.match((restored!.nodes![0] as any).file, /^data:video\/mp4;base64,/)
-  assert.deepEqual(restored, exported)
+  assert.match((restored!.nodes![0] as any).file, /^blob:/)
+  assert.deepEqual(await portableCanvas(restored!), exported)
   assert.equal(JSON.stringify(exported).includes('blob:'), false)
+})
+
+test('loading another board preserves asset references for active content, recovery and subsequent saves', async () => {
+  const repo = new LocalRepository()
+  await repo.save('images', withImage())
+  await repo.save('other', canvas('other'))
+  const active = (await repo.load('images'))!
+  await repo.load('other')
+  repo.journal('images', active)
+  const raw = localStorage.getItem(localStorage.key(0)!)!
+  assert.doesNotMatch(raw, /blob:|data:image/)
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('unchanged images must not be read or hashed again') }
+  try { await repo.save('images', { ...active, meta: { name: 'edited after file switch' } }) }
+  finally { globalThis.fetch = originalFetch }
+  assert.equal((await inspect('assets')).length, 1)
+  assert.deepEqual((await portableCanvas((await repo.load('images'))!)).nodes, withImage().nodes)
 })
 
 test('concurrent tabs cannot replace a newer document, including simultaneous first writes', async () => {
@@ -259,7 +282,7 @@ test('failed transactions roll back document and assets together and can be retr
   assert.equal((await new LocalRepository().load('board'))!.meta!.name, 'before')
   assert.equal((await inspect('assets')).length, 0)
   await repository.save('board', withImage())
-  assert.deepEqual(await new LocalRepository().load('board'), withImage())
+  assert.deepEqual(await portableCanvas((await new LocalRepository().load('board'))!), withImage())
 })
 
 test('missing assets and newer storage schemas fail closed without overwriting stored content', async () => {
