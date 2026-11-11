@@ -1,0 +1,73 @@
+import assert from 'node:assert/strict'
+import { createHash, randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+
+// Run only against a local Wrangler instance; no production data is touched.
+const origin = 'http://127.0.0.1:8787'
+const password = (await readFile(process.argv[2] || '/tmp/see-cloud-test-password', 'utf8')).trim()
+async function request(path, { token, body, ...init } = {}) {
+  return fetch(origin + '/api/' + path, {
+    ...init, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body && typeof body !== 'string' && !(body instanceof Uint8Array) ? { 'Content-Type': 'application/json' } : {}), ...init.headers },
+    body: body && typeof body !== 'string' && !(body instanceof Uint8Array) ? JSON.stringify(body) : body,
+  })
+}
+assert.equal((await request('boards')).status, 401)
+assert.equal((await request('assets/' + 'a'.repeat(64))).status, 401)
+assert.equal((await request('login', { method: 'POST', body: { username: 'owner', password: 'wrong-password' } })).status, 401)
+assert.equal((await request('login', { method: 'POST', headers: { Origin: 'https://untrusted.invalid' }, body: { username: 'owner', password } })).status, 403)
+const login = await request('login', { method: 'POST', body: { username: 'owner', password } })
+assert.equal(login.status, 200, await login.clone().text())
+const { token, vaultId } = await login.json()
+assert.ok(token && vaultId)
+assert.equal((await request('session', { token })).status, 200)
+
+const id = 'integration-' + randomUUID()
+const doc = { nodes: [{ id: 'text', type: 'text', text: 'hello', x: 0, y: 0, width: 100, height: 50 }], edges: [], meta: { name: id } }
+const save = (revision, value) => request(`boards/${id}`, { method: 'PUT', token, body: { baseRevision: revision, doc: value } })
+assert.equal((await save(0, doc)).status, 200)
+const racing = await Promise.all([save(1, { ...doc, meta: { name: 'left' } }), save(1, { ...doc, meta: { name: 'right' } })])
+assert.deepEqual(racing.map((response) => response.status).sort(), [200, 409])
+const current = await (await request(`boards/${id}`, { token })).json()
+assert.equal(current.revision, 2)
+assert.equal((await save(0, doc)).status, 409)
+assert.equal((await request(`boards/${id}/history`, { token })).status, 200)
+assert.deepEqual((await (await request(`boards/${id}/history/1`, { token })).json()).doc, doc)
+
+const data = new Uint8Array(8 * 1024 * 1024 + 128).fill(42)
+const mime = 'video/mp4'
+const digest = createHash('sha256').update(mime + '\0').update(data).digest('hex')
+const start = () => request('uploads', { method: 'POST', token, body: { hash: digest, mime, size: data.length } })
+const begun = await start()
+assert.equal(begun.status, 200, await begun.clone().text())
+const upload = await begun.json()
+if (!upload.complete) {
+  const first = data.slice(0, 8 * 1024 * 1024)
+  assert.equal((await request(`uploads/${encodeURIComponent(upload.uploadId)}/1`, { method: 'PUT', token, body: first, headers: { 'X-Content-SHA256': 'bad' } })).status, 400)
+  for (let part = 1; part <= 2; part++) {
+    const chunk = data.slice((part - 1) * 8 * 1024 * 1024, part * 8 * 1024 * 1024)
+    const response = await request(`uploads/${encodeURIComponent(upload.uploadId)}/${part}`, { method: 'PUT', token, body: chunk, headers: { 'X-Content-SHA256': createHash('sha256').update(chunk).digest('hex') } })
+    assert.equal(response.status, 200, await response.clone().text())
+    if (part === 1) {
+      const resumed = await (await start()).json()
+      assert.equal(resumed.uploadId, upload.uploadId)
+      assert.deepEqual(resumed.parts, [1])
+      assert.equal((await request(`uploads/${encodeURIComponent(upload.uploadId)}/complete`, { method: 'POST', token })).status, 409)
+    }
+  }
+  const complete = await request(`uploads/${encodeURIComponent(upload.uploadId)}/complete`, { method: 'POST', token })
+  assert.equal(complete.status, 200, await complete.clone().text())
+}
+assert.equal((await (await start()).json()).complete, true)
+const downloaded = await request(`assets/${digest}`, { token })
+assert.equal(downloaded.status, 200)
+assert.deepEqual(new Uint8Array(await downloaded.arrayBuffer()), data)
+const range = await request(`assets/${digest}`, { token, headers: { Range: 'bytes=0-9' } })
+assert.equal(range.status, 206)
+assert.equal((await range.arrayBuffer()).byteLength, 10)
+const mediaDoc = { ...doc, nodes: [...doc.nodes, { id: 'image', type: 'image', x: 0, y: 0, width: 10, height: 10, url: `see-asset:${digest}` }] }
+assert.equal((await save(2, mediaDoc)).status, 200)
+assert.equal((await save(3, null)).status, 200)
+assert.equal((await save(4, mediaDoc)).status, 409)
+assert.equal((await request('logout', { method: 'POST', token })).status, 200)
+assert.equal((await request('session', { token })).status, 401)
+console.log('Cloud runtime passed: auth, origin checks, CAS, history, resumable multipart, integrity, range reads, tombstones, logout.')

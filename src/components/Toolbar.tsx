@@ -9,6 +9,7 @@ import { IconButton } from './IconButton'
 import { FilesSidebar } from './FilesSidebar'
 import { libraryStore } from '../store/library'
 import { SaveStatus } from './SaveStatus'
+import { CloudDialog } from './CloudDialog'
 
 const TOOLS = [
   { id: 'select' as const, label: '选择', icon: Cursor },
@@ -26,6 +27,7 @@ export function Toolbar(props: { tool: ToolId; setTool: (t: ToolId) => void; onS
   const [imageOpen, setImageOpen] = useState(false)
   const [imageUrl, setImageUrl] = useState('')
   const [error, setError] = useState('')
+  const [cloudOpen, setCloudOpen] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null), importRef = useRef<HTMLInputElement>(null), popRef = useRef<HTMLDivElement>(null), nameRef = useRef<HTMLInputElement>(null)
   useEffect(() => { document.title = `see•${doc.meta?.name || '未命名画布'}` }, [doc.meta?.name])
   useEffect(() => { if (renaming) { nameRef.current?.focus(); nameRef.current?.select() } }, [renaming])
@@ -76,12 +78,14 @@ export function Toolbar(props: { tool: ToolId; setTool: (t: ToolId) => void; onS
       { label: '保存到本地', shortcut: shortcut('save'), action: () => { void requestPersistentStorage(); void saveLocal().catch(() => {}) } },
       { label: '打开 .canvas…', shortcut: shortcut('open'), action: () => importRef.current?.click() },
       { label: '下载 .canvas', action: download },
+      { label: '云端同步…', action: () => setCloudOpen(true) },
     ],
     编辑: [command('撤销', 'undo', !documentStore.canUndo), command('重做', 'redo', !documentStore.canRedo), null, command('剪切', 'cut'), command('复制', 'copy'), command('粘贴', 'paste'), command('创建副本', 'duplicate'), null, command('全选', 'select-all'), command('组合', 'group'), command('取消组合 / 解散列表', 'ungroup'), command('删除', 'delete')],
     视图: [command('缩放至全部内容', 'fit'), command('缩放至 100%', 'reset-zoom'), command('显示 / 隐藏界面', 'toggle-ui')],
     导出: [{ label: '下载 .canvas', action: download }, command('导出为 SVG', 'export-svg'), command('导出为 PNG', 'export-png'), null, command('复制为 SVG', 'copy-svg'), command('复制为 PNG', 'copy-png')],
   }
   return <aside className={`toolbar ${expanded ? 'sidebar-open' : ''}`} aria-label="白板功能栏">
+    {cloudOpen && <CloudDialog onClose={() => setCloudOpen(false)} />}
     <div className="board-header floating-panel">
       <IconButton icon={SidebarSimple} label={expanded ? '收起左侧功能栏' : '展开左侧功能栏'} active={expanded} aria-expanded={expanded} aria-controls="files-sidebar" onClick={() => setExpanded(!expanded)} />
       <span className="document-title">

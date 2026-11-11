@@ -259,3 +259,10 @@ button { touch-action: manipulation; }
 .storage-notice { position: fixed; top: 72px; left: 50%; transform: translateX(-50%); width: min(440px, calc(100vw - 32px)); padding: 14px; z-index: 100; font-size: 13px; }
 .storage-notice > div { display: flex; gap: 8px; margin-top: 10px; }
 .storage-notice button { padding: 6px 10px; border: 1px solid #e3eaee; border-radius: 6px; background: white; cursor: pointer; }
+.cloud-backdrop { position: fixed; inset: 0; z-index: 200; background: #24213033; display: grid; place-items: center; pointer-events: auto; }
+.cloud-dialog { width: min(390px, calc(100vw - 32px)); padding: 20px; }
+.cloud-dialog label { display: grid; gap: 6px; margin: 14px 0; font-size: 13px; }
+.cloud-dialog input { width: 100%; padding: 9px; border: 1px solid #dce2e8; border-radius: 6px; }
+.cloud-dialog p { font-size: 12px; line-height: 1.6; color: #686370; }
+.cloud-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.cloud-actions button { border: 1px solid #dce2e8; border-radius: 6px; padding: 8px 12px; background: white; cursor: pointer; }

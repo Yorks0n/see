@@ -3,6 +3,9 @@ import { Board } from './components/Board'
 import { Toolbar } from './components/Toolbar'
 import { libraryStore } from './store/library'
 import type { ToolId } from './tools/tools'
+import { localRepository, persistenceStore } from './persistence'
+import { documentStore } from './store/document'
+import { startCloudSync } from './sync/cloud'
 
 export default function App() {
   const [tool, setTool] = useState<ToolId>('select')
@@ -16,6 +19,12 @@ export default function App() {
     void libraryStore.initialize().catch((error: Error) => setError(error.message))
   }, [])
   useEffect(() => { setNewNodeId(null); setTool('select') }, [library.activeFileId])
+  useEffect(() => {
+    if (!library.ready) return
+    return startCloudSync(localRepository,
+      () => !libraryStore.getSnapshot().busy && !documentStore.isInteracting && persistenceStore.getSnapshot().state === 'saved',
+      (action) => libraryStore.applyCloudChange(action))
+  }, [library.ready])
   useLayoutEffect(() => {
     // Do not accept edits to the old document while a file is being loaded.
     appRef.current?.toggleAttribute('inert', library.busy)

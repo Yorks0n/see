@@ -250,3 +250,33 @@ test('a corrupt recovery journal is preserved and not silently discarded', async
   await assert.rejects(new LocalRepository().recover(localStorage))
   assert.equal(localStorage.getItem(`${RECOVERY_PREFIX}bad`), '{broken')
 })
+
+test('remote updates are atomic with sync base and never overwrite a newer local edit', async () => {
+  const repo = new LocalRepository()
+  await repo.save('board', canvas('local'))
+  const [entry] = await repo.syncEntries('vault')
+  await repo.save('board', canvas('newer edit'))
+  await assert.rejects(repo.acceptRemote('vault', 'board', entry.revision, { revision: 2, doc: canvas('remote') }), StorageConflictError)
+  assert.equal((await repo.load('board'))!.meta!.name, 'newer edit')
+  assert.equal((await repo.syncEntries('vault'))[0].base, undefined)
+})
+
+test('conflict copies and remote tombstones commit together and survive reopening', async () => {
+  const repo = new LocalRepository()
+  await repo.save('board', canvas('offline'))
+  await repo.acceptRemote('vault', 'board', 1, { revision: 3, doc: null }, 'copy')
+  const reopened = new LocalRepository()
+  assert.equal(await reopened.load('board'), null)
+  assert.equal((await reopened.load('copy'))!.meta!.name, 'offline（冲突副本）')
+  const entry = (await reopened.syncEntries('vault')).find((value) => value.id === 'board')!
+  assert.deepEqual(entry.base, { revision: 3, doc: null })
+})
+
+test('sync acknowledgements never move the common base backwards across tabs', async () => {
+  const repo = new LocalRepository()
+  await repo.save('board', canvas())
+  await repo.acknowledge('vault', 'board', { revision: 10, doc: canvas('newer') })
+  await repo.acknowledge('vault', 'board', { revision: 2, doc: canvas('older') })
+  assert.equal((await repo.syncEntries('vault'))[0].base!.revision, 10)
+  assert.equal((await repo.syncEntries('different-vault'))[0].base, undefined)
+})

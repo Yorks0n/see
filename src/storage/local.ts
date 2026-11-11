@@ -1,4 +1,5 @@
 import type { CanvasFile, CanvasNode } from '../types'
+import type { SyncBase } from '../sync/protocol'
 
 export const DATABASE_NAME = 'whiteboard-db'
 export const RECOVERY_PREFIX = 'see-local-recovery:'
@@ -18,6 +19,7 @@ interface Journal {
   doc: CanvasFile
 }
 export interface LocalFile { id: string; name: string }
+export interface SyncEntry { id: string; revision: number; doc: CanvasFile | null; base?: SyncBase }
 
 export class StorageConflictError extends Error {
   constructor() { super('此白板已在另一个标签页修改或删除，请将当前内容保存为副本。') }
@@ -70,7 +72,10 @@ export class LocalRepository {
   private media = new Map<string, string>()
   private tail: Promise<unknown> = Promise.resolve()
   private writer = crypto.randomUUID()
+  private listeners = new Set<() => void>()
   constructor(private name = DATABASE_NAME) {}
+  subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
+  private notify() { this.listeners.forEach((listener) => listener()) }
 
   private open(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
@@ -216,6 +221,7 @@ export class LocalRepository {
         }
       })
       this.revisions.set(id, revision)
+      this.notify()
       prepared.replacements.forEach((ref, url) => this.media.set(url, ref))
       // Keep a newer pagehide journal until that exact snapshot has committed.
       try {
@@ -243,6 +249,7 @@ export class LocalRepository {
         }
       })
       this.revisions.set(id, expected + 1)
+      this.notify()
       try { localStorage.removeItem(`${RECOVERY_PREFIX}${this.writer}:${id}`) } catch { /* Optional journal. */ }
       // Assets are retained: undo, duplicates and recovery journals may still reference them.
     })
@@ -259,6 +266,79 @@ export class LocalRepository {
 
   clearJournal(id: string) {
     try { localStorage.removeItem(`${RECOVERY_PREFIX}${this.writer}:${id}`) } catch { /* Optional journal. */ }
+  }
+
+  async syncEntries(vault: string): Promise<SyncEntry[]> {
+    await this.tail
+    return this.transaction(['kv'], 'readonly', (tx, done, fail) => {
+      const request = tx.objectStore('kv').getAllKeys(), result: SyncEntry[] = []
+      request.onsuccess = () => {
+        const keys = request.result.filter((key) => String(key).startsWith('canvas:'))
+        if (!keys.length) { done(result); return }
+        let pending = keys.length
+        for (const key of keys) {
+          const id = String(key).slice(7), read = tx.objectStore('kv').get(key)
+          read.onsuccess = () => {
+            try {
+              const saved = record(read.result)!
+              const base = tx.objectStore('kv').get(`sync:${vault}:${id}`)
+              base.onsuccess = () => {
+                result.push({ id, revision: saved.revision, doc: saved.doc, base: base.result })
+                if (--pending === 0) done(result)
+              }
+            } catch (error) { fail(error as Error) }
+          }
+        }
+      }
+    })
+  }
+
+  async getAsset(ref: string): Promise<Blob | undefined> {
+    return this.transaction(['assets'], 'readonly', (tx, done) => {
+      const request = tx.objectStore('assets').get(ASSET_PREFIX + ref)
+      request.onsuccess = () => done(request.result)
+    })
+  }
+
+  async cacheAsset(ref: string, blob: Blob) {
+    const digest = await crypto.subtle.digest('SHA-256', await new Blob([blob.type, '\0', blob]).arrayBuffer())
+    const actual = [...new Uint8Array(digest)].map((n) => n.toString(16).padStart(2, '0')).join('')
+    if (actual !== ref) throw new Error('下载附件校验失败，请重试')
+    await this.transaction<void>(['assets'], 'readwrite', (tx, done) => {
+      tx.objectStore('assets').put(blob, ASSET_PREFIX + ref); done()
+    })
+  }
+
+  acknowledge(vault: string, id: string, base: SyncBase) {
+    return this.enqueue(() => this.transaction<void>(['kv'], 'readwrite', (tx, done) => {
+      const store = tx.objectStore('kv'), key = `sync:${vault}:${id}`, request = store.get(key)
+      request.onsuccess = () => {
+        if (!request.result || request.result.revision <= base.revision) store.put(base, key)
+        done()
+      }
+    }))
+  }
+
+  acceptRemote(vault: string, id: string, expected: number, remote: SyncBase, backupId?: string): Promise<void> {
+    return this.enqueue(() => this.transaction<void>(['kv'], 'readwrite', (tx, done, fail) => {
+      const store = tx.objectStore('kv'), request = store.get(`canvas:${id}`)
+      request.onsuccess = () => {
+        try {
+          const current = record(request.result)
+          if ((current?.revision ?? 0) !== expected) throw new StorageConflictError()
+          if (backupId && current?.doc) {
+            store.put({
+              schemaVersion: 1, revision: 1, savedAt: Date.now(),
+              doc: { ...current.doc, meta: { ...current.doc.meta, name: `${current.doc.meta?.name || '白板'}（冲突副本）` } },
+            } satisfies StoredCanvas, `canvas:${backupId}`)
+          }
+          const doc = remote.doc ? { ...remote.doc, meta: { ...remote.doc.meta, camera: current?.doc?.meta?.camera } } : null
+          store.put({ schemaVersion: 1, revision: expected + 1, savedAt: Date.now(), doc } satisfies StoredCanvas, `canvas:${id}`)
+          store.put(remote, `sync:${vault}:${id}`)
+          done()
+        } catch (error) { fail(error as Error) }
+      }
+    }))
   }
 
   // Legacy stores remain readable until each import has committed. A stale recovery

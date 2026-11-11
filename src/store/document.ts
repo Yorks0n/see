@@ -120,6 +120,7 @@ export class DocumentStore {
 
   get canUndo() { return this.past.length > 0 }
   get canRedo() { return this.future.length > 0 }
+  get isInteracting() { return this.interaction !== null }
 
   private commit(next: CanvasFile) {
     if (!this.interaction) {

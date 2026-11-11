@@ -1,4 +1,4 @@
-import { deleteLocalFile, downloadCanvasFile, initializeLocal, localRepository, loadLocal, markLoaded, saveCanvas, saveLocal, setActiveFile } from '../persistence'
+import { deleteLocalFile, downloadCanvasFile, initializeLocal, localRepository, loadLocal, markLoaded, persistenceStore, saveCanvas, saveLocal, setActiveFile } from '../persistence'
 import type { CanvasFile } from '../types'
 import { cameraStore } from './camera'
 import { documentStore, uid } from './document'
@@ -167,6 +167,31 @@ export class LibraryStore {
       doc.meta = { ...doc.meta, camera: cameraStore.getSnapshot() }
       await this.addFile(`${doc.meta.name || '白板'} 副本`, doc)
       if (sourceId) localRepository.clearJournal(sourceId)
+    } finally { this.emit({ busy: false }) }
+  }
+  async applyCloudChange(action: () => Promise<void>): Promise<boolean> {
+    if (this.state.busy || documentStore.isInteracting || persistenceStore.getSnapshot().state !== 'saved') return false
+    this.emit({ busy: true })
+    try {
+      await action()
+      await this.refreshFromStorage(true)
+      return true
+    } finally { this.emit({ busy: false }) }
+  }
+  async refreshFromStorage(locked = false) {
+    if (this.state.busy && !locked) return
+    this.emit({ busy: true })
+    try {
+      const stored = await localRepository.list()
+      const files = pinnedFirst(stored.map((file) => ({ ...file, pinned: this.state.files.find((old) => old.id === file.id)?.pinned })))
+      const active = files.find((file) => file.id === this.state.activeFileId) ?? files[0]
+      if (!active) { await this.addFile('未命名白板'); return }
+      const doc = await loadLocal(active.id)
+      if (!doc) return
+      setActiveFile(active.id)
+      this.emit({ files, activeFileId: active.id })
+      this.applyDocument(doc)
+      this.persist()
     } finally { this.emit({ busy: false }) }
   }
   async deleteFile(id: string) {
