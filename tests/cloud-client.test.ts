@@ -96,6 +96,24 @@ test('client persists offline edits, merges after reconnect, retries races and p
     assert.equal(remote.get('board')!.doc!.nodes![0].color, '3')
     assert.equal((await repo.load('board'))!.meta!.name, 'racing server edit')
     assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+
+    const annotated = (await repo.load('board'))!
+    annotated.nodes!.push(
+      { id: 'z-card', type: 'text', text: 'annotated card', x: 0, y: 0, width: 200, height: 100 },
+      ...['stroke-c', 'stroke-a', 'stroke-b'].map((id) => ({
+        id, type: 'draw' as const, x: 10, y: 10, width: 50, height: 50,
+        points: [{ x: 0, y: 0 }, { x: 50, y: 50 }], strokeWidth: 4,
+      })),
+    )
+    await repo.save('board', annotated)
+    const current = remote.get('board')!
+    remote.set('board', { ...current, revision: current.revision + 1, doc: { ...current.doc!, meta: { name: 'renamed during drawing' } } })
+    await cloud.syncNow()
+    const expectedOrder = annotated.nodes!.map((node) => node.id)
+    assert.deepEqual(remote.get('board')!.doc!.nodes!.map((node) => node.id), expectedOrder)
+    assert.deepEqual((await repo.load('board'))!.nodes!.map((node) => node.id), expectedOrder)
+    assert.equal((await repo.load('board'))!.meta!.name, 'renamed during drawing')
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
   } finally { stop(); globalThis.fetch = originalFetch }
 })
 

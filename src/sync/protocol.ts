@@ -121,9 +121,36 @@ function records<T extends { id: string }>(base: T[], local: T[], remote: T[], n
   const surviving = new Set([...old.keys()].filter((id) => merged.has(id)))
   const order = (items: T[]) => items.map((item) => item.id).filter((id) => surviving.has(id))
   const ordered = field(order(base), order(local), order(remote)) as string[]
-  // Concurrent additions are retained in deterministic order after existing records.
-  const additions = [...merged.keys()].filter((id) => !old.has(id)).sort()
-  return [...ordered, ...additions].map((id) => merged.get(id)!)
+  // Preserve stacking around new records; sorting their random IDs can hide
+  // annotations behind the image they were drawn on.
+  const graph = new Map([...merged.keys()].map((id) => [id, { next: new Set<string>(), incoming: 0 }]))
+  const constrain = (ids: string[], additionsOnly = false) => {
+    for (let i = 1; i < ids.length; i++) {
+      const before = ids[i - 1], after = ids[i]
+      if (additionsOnly && old.has(before) && old.has(after)) continue
+      const source = graph.get(before)!
+      if (!source.next.has(after)) {
+        source.next.add(after)
+        graph.get(after)!.incoming++
+      }
+    }
+  }
+  constrain(ordered)
+  for (const branch of [local, remote]) constrain(branch.map((item) => item.id).filter((id) => merged.has(id)), true)
+  const ready = [...graph.keys()].filter((id) => graph.get(id)!.incoming === 0).sort().reverse()
+  const result: T[] = []
+  while (ready.length) {
+    const id = ready.pop()!
+    result.push(merged.get(id)!)
+    for (const next of graph.get(id)!.next) {
+      if (--graph.get(next)!.incoming === 0) {
+        ready.push(next)
+        ready.sort().reverse()
+      }
+    }
+  }
+  if (result.length !== merged.size) throw new MergeConflict()
+  return result
 }
 
 export function mergeCanvas(base: CanvasFile | null, local: CanvasFile | null, remote: CanvasFile | null): { doc: CanvasFile | null; conflict: boolean } {

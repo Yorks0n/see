@@ -6,7 +6,7 @@ import { CameraStore, cameraStore } from '../src/store/camera'
 import { DEFAULT_CONNECTION_COLOR, PreferencesStore, preferencesStore, THEME_STORAGE_KEY, COLORS_STORAGE_KEY } from '../src/store/preferences'
 import { cameraAtCenter, minimapBounds, minimapCamera, viewportRect, zoomAtCenter } from '../src/render/minimap'
 import { edgeGeometry, hitTest, PRESET_COLORS, strokePath } from '../src/render/renderer'
-import { arrangeNodes, createImageCard, createList, createTextCard, duplicateNodes, expandSelection, finishConnection, listFromSelection, moveConnection, splitImageCaption, startConnection, tools, ToolState, ungroupNodes, updateMembership, type ToolEnv, type PointerInfo } from '../src/tools/tools'
+import { arrangeNodes, createImageCard, createList, createTextCard, duplicateNodes, expandSelection, finishConnection, finishToolGesture, listFromSelection, moveConnection, splitImageCaption, startConnection, tools, ToolState, ungroupNodes, updateMembership, type ToolEnv, type PointerInfo } from '../src/tools/tools'
 import { arrangement, ARRANGE_GAP } from '../src/tools/layout'
 import { resizeSelection, selectionBounds } from '../src/tools/resize'
 import { selectionSVG } from '../src/tools/export'
@@ -1066,6 +1066,57 @@ test('freehand supports single dots and preserves brush appearance across camera
   assert.deepEqual(camera.worldToScreen(40, 40), { x: 180, y: 130 })
   camera.set({ x: NaN, y: Infinity, zoom: NaN })
   assert.deepEqual(camera.getSnapshot(), { x: 100, y: 50, zoom: 2 })
+})
+
+test('quick strokes finish without a move event and repeated release signals commit only once', () => {
+  documentStore.load({ nodes: [] })
+  const env = environment(), state = new ToolState()
+  for (const end of [pointer(40, 40), pointer(80, 100), pointer(120, 40)]) {
+    const start = pointer(end.world.x, 40)
+    documentStore.beginInteraction()
+    tools.draw.onPointerDown!(start, env, state)
+    assert.equal(finishToolGesture('draw', end, env, state), true)
+    // pointerup, mouseup and lostpointercapture may all describe one release.
+    assert.equal(finishToolGesture('draw', end, env, state), false)
+    assert.equal(finishToolGesture('draw', end, env, state), false)
+    assert.equal(documentStore.isInteracting, false)
+  }
+  assert.equal(documentStore.getSnapshot().nodes!.length, 3)
+  const stroke = documentStore.getSnapshot().nodes![1]
+  assert.equal(stroke.type, 'draw')
+  if (stroke.type === 'draw') assert.deepEqual(stroke.points, [{ x: 0, y: 0 }, { x: 0, y: 60 }])
+  for (const count of [2, 1, 0]) {
+    documentStore.undo()
+    assert.equal(documentStore.getSnapshot().nodes!.length, count)
+  }
+  assert.equal(documentStore.canUndo, false)
+  for (const count of [1, 2, 3]) {
+    documentStore.redo()
+    assert.equal(documentStore.getSnapshot().nodes!.length, count)
+  }
+})
+
+test('fallback gesture completion also commits rectangles and card moves as one undo step', () => {
+  documentStore.load({ nodes: [card('a')] })
+  const original = documentStore.getSnapshot().nodes
+  const env = environment(), state = new ToolState()
+  documentStore.beginInteraction()
+  tools.rectangle.onPointerDown!(pointer(300, 200), env, state)
+  tools.rectangle.onPointerMove!(pointer(400, 300), env, state)
+  assert.equal(finishToolGesture('rectangle', pointer(400, 300), env, state), true)
+  assert.equal(documentStore.isInteracting, false)
+  assert.equal(documentStore.getSnapshot().nodes!.length, 2)
+  documentStore.undo()
+  assert.deepEqual(documentStore.getSnapshot().nodes, original)
+
+  documentStore.beginInteraction()
+  tools.select.onPointerDown!(pointer(40, 40, 'a'), env, state)
+  tools.select.onPointerMove!(pointer(80, 100, 'a'), env, state)
+  assert.equal(finishToolGesture('select', pointer(80, 100, 'a'), env, state), true)
+  assert.equal(documentStore.isInteracting, false)
+  assert.equal(documentStore.getNode('a')!.x, 60)
+  documentStore.undo()
+  assert.deepEqual(documentStore.getSnapshot().nodes, original)
 })
 
 test('new drawings stack above existing nodes and layer changes update hits with undo', () => {

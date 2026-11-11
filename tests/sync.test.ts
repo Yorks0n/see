@@ -45,6 +45,63 @@ test('concurrent additions both survive and result order is deterministic', () =
   assert.deepEqual(mergeCanvas(base, left, right), mergeCanvas(base, right, left))
   assert.equal(mergeCanvas(base, left, right).doc!.nodes!.length, 4)
 })
+test('sync retains image annotations and consecutive stroke order when the other device edits metadata', () => {
+  const base = doc(), local = doc(), remote = doc()
+  local.nodes!.push(
+    { id: 'z-image', type: 'image', x: 0, y: 0, width: 100, height: 100, url: `see-asset:${'a'.repeat(64)}` },
+    ...['stroke-c', 'stroke-a', 'stroke-b'].map((id) => ({
+      id, type: 'draw' as const, x: 0, y: 0, width: 100, height: 100,
+      points: [{ x: 0, y: 0 }, { x: 100, y: 100 }], strokeWidth: 4,
+    })),
+  )
+  remote.meta!.name = 'renamed remotely'
+  for (const [left, right] of [[local, remote], [remote, local]]) {
+    const merged = mergeCanvas(base, left, right)
+    assert.equal(merged.conflict, false)
+    assert.deepEqual(merged.doc!.nodes, local.nodes)
+    assert.equal(merged.doc!.meta!.name, remote.meta!.name)
+    assert.deepEqual(applyCanvasChanges(remote, canvasChanges(remote, merged.doc!)), merged.doc)
+  }
+})
+test('concurrent additions preserve each device stacking order, including insertions behind existing content', () => {
+  const base = doc(), left = doc(), right = doc()
+  left.nodes!.unshift({ ...left.nodes![0], id: 'z-background' })
+  left.nodes!.push({ ...left.nodes![0], id: 'left-z' }, { ...left.nodes![0], id: 'left-a' })
+  right.nodes!.splice(1, 0, { ...right.nodes![0], id: 'right-z' }, { ...right.nodes![0], id: 'right-a' })
+  const merged = mergeCanvas(base, left, right)
+  assert.equal(merged.conflict, false)
+  assert.deepEqual(merged, mergeCanvas(base, right, left))
+  const ids = merged.doc!.nodes!.map((node) => node.id)
+  for (const branch of [left, right]) {
+    const known = new Set(branch.nodes!.map((node) => node.id))
+    assert.deepEqual(ids.filter((id) => known.has(id)), branch.nodes!.map((node) => node.id))
+  }
+})
+test('merging another field retains explicit layer changes and additions shared by both devices', () => {
+  const base = doc(), left = doc(), right = doc()
+  left.nodes!.reverse()
+  left.nodes!.splice(1, 0, { ...left.nodes![0], id: 'between' })
+  right.nodes![0].color = '3'
+  let merged = mergeCanvas(base, left, right)
+  assert.equal(merged.conflict, false)
+  assert.deepEqual(merged.doc!.nodes!.map((node) => node.id), ['b', 'between', 'a'])
+  assert.equal(merged.doc!.nodes!.find((node) => node.id === 'a')!.color, '3')
+
+  const shared = { ...base.nodes![0], id: 'z-shared' }
+  left.nodes = [...base.nodes!, shared, { ...shared, id: 'a-local' }]
+  right.nodes = [...base.nodes!, shared, { ...shared, id: 'b-remote' }]
+  merged = mergeCanvas(base, left, right)
+  assert.equal(merged.conflict, false)
+  assert.deepEqual(merged, mergeCanvas(base, right, left))
+  assert.deepEqual(merged.doc!.nodes!.map((node) => node.id), ['a', 'b', 'z-shared', 'a-local', 'b-remote'])
+})
+test('incompatible stacking constraints preserve a conflict instead of hiding content', () => {
+  const base = doc(), left = doc(), right = doc()
+  const first = { ...base.nodes![0], id: 'first' }, second = { ...base.nodes![0], id: 'second' }
+  left.nodes!.push(first, second)
+  right.nodes!.push(second, first)
+  assert.equal(mergeCanvas(base, left, right).conflict, true)
+})
 test('reconnect compares semantic JSON rather than property insertion order', () => {
   assert.equal(equal({ a: 1, b: 2 }, { b: 2, a: 1 }), true)
   assert.equal(equal({ a: undefined }, {}), true)

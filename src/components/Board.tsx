@@ -3,7 +3,7 @@ import { X } from './icons'
 import { cameraStore, clampZoom } from '../store/camera'
 import { documentStore } from '../store/document'
 import { hitTest, renderInteractiveScene, renderStaticScene } from '../render/renderer'
-import { createImageCard, createTextCard, deleteNodes, duplicateNodes, expandSelection, finishConnection, groupNodes, ungroupNodes, moveConnection, startConnection, tools, ToolState, updateMembership, viewportCenterWorld, type DrawStyle, type PointerInfo, type ToolId, type ToolEnv } from '../tools/tools'
+import { createImageCard, createTextCard, deleteNodes, duplicateNodes, expandSelection, finishToolGesture, groupNodes, ungroupNodes, moveConnection, startConnection, tools, ToolState, updateMembership, viewportCenterWorld, type DrawStyle, type PointerInfo, type ToolId, type ToolEnv } from '../tools/tools'
 import { markDirty, persistenceStore, saveLocal, saveRecovery } from '../persistence'
 import type { DrawPoint, ImageNode } from '../types'
 import { CardLayer, StrokeWidths } from './CardLayer'
@@ -276,16 +276,18 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
       if (state.dragging?.type === 'draw') setActiveStroke([...(state.dragging.points ?? [])])
     } else tools[dragToolRef.current].onPointerMove?.(info, env, state)
   }
-  const onPointerUp = (e: React.PointerEvent) => {
+  const onPointerUp = (e: React.PointerEvent | React.MouseEvent) => {
     if (!state.dragging) return
-    const info = toPointerInfo(e)
-    const transient = state.dragging.type === 'pan' || state.dragging.type === 'laser'
-    if (state.dragging.type === 'connect') finishConnection(info, env, state)
-    else tools[dragToolRef.current].onPointerUp?.(info, env, state)
-    if (!transient) documentStore.endInteraction()
-    if (containerRef.current?.hasPointerCapture(e.pointerId)) containerRef.current.releasePointerCapture(e.pointerId)
+    finishToolGesture(dragToolRef.current, toPointerInfo(e), env, state)
+    if ('pointerId' in e && containerRef.current?.hasPointerCapture(e.pointerId)) containerRef.current.releasePointerCapture(e.pointerId)
     setActiveStroke(null); setInteracting(false)
     setListDrop(null)
+  }
+  const onLostPointerCapture = (e: React.PointerEvent) => {
+    if (!state.dragging) return
+    // Chrome on macOS can release a moving mouse without delivering pointerup.
+    if (e.pointerType === 'mouse' && e.buttons === 0) onPointerUp(e)
+    else cancel()
   }
   const onDoubleClick = (e: React.MouseEvent) => {
     if (props.tool !== 'select') return
@@ -497,7 +499,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     setCropId(null); props.setTool('select')
     setContextMenu({ x: e.clientX, y: e.clientY, world: info.world, nodeId: node?.id, edgeId: clickedEdge })
   }
-  return <div ref={containerRef} className={`board tool-${props.tool} ${touchEditing ? 'touch-editing' : ''} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDownCapture={onTouchPointerDown} onPointerMoveCapture={onTouchPointerMove} onPointerUpCapture={onTouchPointerEnd} onPointerCancelCapture={onTouchPointerEnd} onLostPointerCaptureCapture={onTouchPointerEnd} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={() => { lastScreenRef.current = null }} onPointerUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={() => { if (state.dragging) cancel() }} onDoubleClick={onDoubleClick} onContextMenu={onContextMenu}
+  return <div ref={containerRef} className={`board tool-${props.tool} ${touchEditing ? 'touch-editing' : ''} ${interacting ? 'interacting' : ''} ${paintTrail ? 'paint-selecting' : ''} ${marquee ? 'box-selecting' : ''}`} onPointerDownCapture={onTouchPointerDown} onPointerMoveCapture={onTouchPointerMove} onPointerUpCapture={onTouchPointerEnd} onPointerCancelCapture={onTouchPointerEnd} onLostPointerCaptureCapture={onTouchPointerEnd} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerLeave={() => { lastScreenRef.current = null }} onPointerUp={onPointerUp} onMouseUp={onPointerUp} onPointerCancel={cancel} onLostPointerCapture={onLostPointerCapture} onDoubleClick={onDoubleClick} onContextMenu={onContextMenu}
     onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragOver(true) } }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false) }}
     onDrop={(e) => { e.preventDefault(); setDragOver(false); setSelection(new Set()); addFiles(Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/')), toPointerInfo(e).world) }}>
     <canvas ref={staticRef} className="canvas static" /><canvas ref={interactiveRef} className="canvas interactive" />

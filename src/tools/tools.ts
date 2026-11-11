@@ -54,6 +54,16 @@ export interface Tool {
   onDoubleClick?(info: PointerInfo, env: ToolEnv): void
 }
 
+export function finishToolGesture(tool: ToolId, info: PointerInfo, env: ToolEnv, state: ToolState): boolean {
+  const drag = state.dragging
+  if (!drag) return false
+  const transient = drag.type === 'pan' || drag.type === 'laser'
+  if (drag.type === 'connect') finishConnection(info, env, state)
+  else tools[tool].onPointerUp?.(info, env, state)
+  if (!transient) documentStore.endInteraction()
+  return true
+}
+
 const topHitAt = (world: { x: number; y: number }) => hitTest(documentStore.getSnapshot(), world.x, world.y, 7 / cameraStore.getSnapshot().zoom)
 export const contains = (outer: Pick<CanvasNode, 'x' | 'y' | 'width' | 'height'>, inner: CanvasNode) => inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height
 
