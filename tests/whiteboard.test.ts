@@ -28,7 +28,7 @@ const card = (id: string, x = 20, y = 20): TextNode => ({ id, type: 'text', x, y
 const frame = (ids = ['a', 'b']): GroupNode => ({ id: 'group', type: 'group', x: 0, y: 0, width: 350, height: 250, label: 'Ideas', memberIds: ids })
 const pointer = (x: number, y: number, nodeId?: string): PointerInfo => ({ world: { x, y }, screen: { x, y }, shiftKey: false, nodeId })
 function environment(selection = new Set<string>()): ToolEnv {
-  const env: ToolEnv = { selection, setSelection: (next) => { env.selection = next }, setDragPreview: () => {}, setMarquee: () => {}, setPaintTrail: () => {}, addLaserPoint: () => {}, setEditingId: () => {}, setTool: () => {}, drawStyle: { color: '5', strokeWidth: 4 } }
+  const env: ToolEnv = { selection, setSelection: (next) => { env.selection = next }, selectionOutline: false, setSelectionOutline: (outline) => { env.selectionOutline = outline }, setDragPreview: () => {}, setMarquee: () => {}, setPaintTrail: () => {}, addLaserPoint: () => {}, setEditingId: () => {}, setTool: () => {}, drawStyle: { color: '5', strokeWidth: 4 } }
   return env
 }
 
@@ -503,6 +503,32 @@ test('multi-selection resize supports independent axes and clamps the whole sele
   assert.equal(proportional.get('photo')!.height, 150)
 })
 
+test('three or six images with thin annotations resize without jumping or hitting stroke minimums', () => {
+  for (const count of [3, 6]) {
+    const nodes: CanvasNode[] = Array.from({ length: count }, (_, i) => ({
+      id: `photo-${i}`, type: 'image', url: 'image.png', x: (i % 3) * 140, y: Math.floor(i / 3) * 240, width: 100, height: 200,
+    }))
+    nodes.push(
+      { id: 'vertical', type: 'draw', x: 170, y: 30, width: 1, height: 150, points: [{ x: 0, y: 0 }, { x: 1, y: 150 }] },
+      { id: 'horizontal', type: 'draw', x: 155, y: 185, width: 60, height: 1, points: [{ x: 0, y: 0 }, { x: 60, y: 1 }] },
+    )
+    const bounds = selectionBounds(nodes)
+    for (const scale of [1, 1.001, 0.999, 0.9, 0.5]) {
+      const patches = resizeSelection(nodes, bounds, bounds.width * (scale - 1), bounds.height * (scale - 1), 'se', true)
+      for (const node of nodes.filter((n) => n.type === 'image')) {
+        const patch = patches.get(node.id)!
+        assert.ok(Math.abs(patch.width! - node.width * scale) < 1e-8)
+        assert.ok(Math.abs(patch.height! - node.height * scale) < 1e-8)
+        assert.ok(Math.abs(patch.x! - node.x * scale) < 1e-8)
+      }
+      assert.equal((patches.get('vertical') as any).points[1].y, 150 * scale)
+      assert.equal((patches.get('horizontal') as any).points[1].x, 60 * scale)
+      assert.ok(patches.get('vertical')!.width! >= 1)
+      assert.ok(patches.get('horizontal')!.height! >= 1)
+    }
+  }
+})
+
 test('resizing a selection with nested groups transforms each member once and preserves undo, redo and cancellation', () => {
   documentStore.load({ nodes: [card('a'), card('b', 200), frame(), card('outside', 500, 400), card('unselected', 900, 900)], edges: [{ id: 'ab', fromNode: 'a', toNode: 'b' }] })
   const ids = expandSelection(new Set(['group', 'a', 'outside']))
@@ -748,6 +774,7 @@ test('shift selection toggles members and retains existing selection during marq
   const env = environment(new Set(['a'])), state = new ToolState()
   tools.select.onPointerDown!({ ...pointer(210, 30), shiftKey: true }, env, state)
   assert.deepEqual([...env.selection], ['a', 'b'])
+  assert.equal(env.selectionOutline, true)
   tools.select.onPointerUp!(pointer(210, 30), env, state)
   tools.select.onPointerDown!({ ...pointer(210, 30), shiftKey: true }, env, state)
   assert.deepEqual([...env.selection], ['a'])
@@ -765,6 +792,7 @@ test('Shift box selection includes images, preserves prior selection, and requir
   assert.deepEqual([...env.selection], ['outside'])
   tools.select.onPointerUp!(shifted(10, 80), env, state)
   assert.deepEqual([...env.selection].sort(), ['a', 'outside', 'photo'])
+  assert.equal(env.selectionOutline, true)
   assert.equal(state.dragging, null)
   assert.equal(documentStore.canUndo, false)
   assert.equal(documentStore.getNode('photo')!.x, 200)
@@ -786,6 +814,31 @@ test('paint selection sweeps across image and text cards without selecting the w
   assert.deepEqual([...env.selection].sort(), ['a', 'photo'])
   tools.select.onPointerUp!(pointer(500, 400), env, state)
   assert.deepEqual([...env.selection].sort(), ['a', 'photo'])
+  assert.equal(env.selectionOutline, false)
+})
+
+test('paint selection clears a previous Shift outline and moving that selection keeps paint highlighting', () => {
+  documentStore.load({ nodes: [card('a', 100, 100), card('b', 300, 100)] })
+  const env = environment(), state = new ToolState()
+  env.selectionOutline = true
+  tools.select.onPointerDown!(pointer(0, 130), env, state)
+  assert.equal(state.dragging!.initialSelectionOutline, true)
+  assert.equal(env.selectionOutline, false)
+  tools.select.onPointerMove!(pointer(500, 130), env, state)
+  tools.select.onPointerUp!(pointer(500, 130), env, state)
+  assert.deepEqual([...env.selection], ['a', 'b'])
+  assert.equal(env.selectionOutline, false)
+  tools.select.onPointerDown!(pointer(110, 110, 'a'), env, state)
+  assert.equal(env.selectionOutline, false)
+  tools.select.onPointerUp!(pointer(110, 110), env, state)
+  tools.select.onPointerDown!({ ...pointer(0, 0), shiftKey: true }, env, state)
+  tools.select.onPointerUp!({ ...pointer(500, 200), shiftKey: true }, env, state)
+  assert.equal(env.selectionOutline, true)
+  tools.select.onPointerDown!(pointer(110, 110, 'a'), env, state)
+  tools.select.onPointerUp!(pointer(110, 110), env, state)
+  assert.equal(env.selectionOutline, true)
+  assert.equal(SHORTCUTS.find((s) => s.id === 'box-select')!.label, '框选并显示整体缩放外框')
+  assert.equal(SHORTCUTS.find((s) => s.id === 'box-select')!.keys, 'Shift + 拖动空白处')
 })
 
 test('Shift can change selection modes at the current pointer position in either order', () => {
@@ -803,19 +856,23 @@ test('Shift can change selection modes at the current pointer position in either
   tools.select.onPointerMove!(pointer(400, 250), env, state)
   tools.select.onPointerMove!(pointer(500, 320), env, state)
   assert.deepEqual([...env.selection], ['photo'])
+  assert.equal(env.selectionOutline, false)
   assert.equal(marquee, null)
   assert.ok(trail)
   const shifted = { ...pointer(500, 320), shiftKey: true }
   tools.select.onPointerMove!(shifted, env, state)
   assert.deepEqual([...env.selection].sort(), ['a', 'photo', 'prior'])
+  assert.equal(env.selectionOutline, true)
   assert.ok(marquee)
   assert.equal(trail, null)
   tools.select.onPointerMove!(pointer(500, 320), env, state)
   assert.deepEqual([...env.selection], ['photo'])
+  assert.equal(env.selectionOutline, false)
   assert.equal(marquee, null)
   assert.ok(trail)
   tools.select.onPointerUp!(shifted, env, state)
   assert.deepEqual([...env.selection].sort(), ['a', 'photo', 'prior'])
+  assert.equal(env.selectionOutline, true)
   assert.equal(marquee, null)
   assert.equal(trail, null)
   const before = environment(new Set(['prior'])), next = new ToolState()

@@ -95,6 +95,7 @@ export interface RenderEnv {
   doc: CanvasFile
   camera: Camera
   selection: Set<string>
+  selectionOutline?: boolean
   marquee?: { x: number; y: number; width: number; height: number } | null
   paintTrail?: DrawPoint[] | null
   activeStroke?: DrawPoint[] | null
@@ -128,7 +129,7 @@ export function renderInteractiveScene(ctx: CanvasRenderingContext2D, env: Rende
   ctx.clearRect(0, 0, width, height)
   ctx.setTransform(dpr * camera.zoom, 0, 0, dpr * camera.zoom, dpr * camera.x, dpr * camera.y)
   for (const n of doc.nodes ?? []) {
-    if (selection.size > 1 || !selection.has(n.id) || n.type !== 'group') continue
+    if ((env.selectionOutline && selection.size > 1) || !selection.has(n.id) || n.type !== 'group') continue
     ctx.fillStyle = 'rgba(49,153,199,0.14)'
     ctx.fillRect(n.x, n.y, n.width, n.height)
     ctx.strokeStyle = '#3199c7'

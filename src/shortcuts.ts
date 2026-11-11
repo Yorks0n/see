@@ -27,7 +27,7 @@ export const SHORTCUTS = [
   { id: 'edit', group: '编辑', label: '编辑文字 / 裁剪图片', keys: 'Enter' },
   { id: 'nudge', group: '编辑', label: '移动选中内容', keys: '方向键 / Shift + 方向键（10px）' },
   { id: 'multi-select', group: '选择', label: '追加 / 取消选择', keys: 'Shift + 点击' },
-  { id: 'box-select', group: '选择', label: '框选', keys: 'Shift + 拖动空白处' },
+  { id: 'box-select', group: '选择', label: '框选并显示整体缩放外框', keys: 'Shift + 拖动空白处' },
   { id: 'resize', group: '编辑', label: '切换自由 / 等比缩放', keys: 'Shift + 拖动缩放手柄' },
   { id: 'open-link', group: '文字编辑', label: '打开文字中的链接', keys: 'Mod + 点击链接' },
   { id: 'cancel', group: '选择', label: '取消操作 / 关闭菜单', keys: 'Esc' },

@@ -10,6 +10,8 @@ export interface DrawStyle { color?: CanvasColor; strokeWidth: number }
 export interface ToolEnv {
   selection: Set<string>
   setSelection: (s: Set<string>) => void
+  selectionOutline: boolean
+  setSelectionOutline: (outline: boolean) => void
   setDragPreview: (p: { fromId: string; to: { x: number; y: number }; targetId?: string } | null) => void
   setMarquee: (m: { x: number; y: number; width: number; height: number } | null) => void
   setPaintTrail: (points: DrawPoint[] | null) => void
@@ -32,6 +34,7 @@ interface DragState {
   originCamera?: { x: number; y: number }
   origins?: Map<string, { x: number; y: number }>
   initialSelection?: Set<string>
+  initialSelectionOutline?: boolean
   currentWorld?: DrawPoint
   selectionMode?: 'paint' | 'box'
   paintedSelection?: Set<string>
@@ -254,6 +257,7 @@ function updateSelectionDrag(info: PointerInfo, env: ToolEnv, state: ToolState) 
   const nodes = documentStore.getSnapshot().nodes ?? []
   const previous = d.selectionMode === 'paint' ? d.currentWorld ?? d.startWorld : info.world
   d.currentWorld = info.world
+  env.setSelectionOutline(info.shiftKey)
   if (info.shiftKey) {
     d.selectionMode = 'box'
     d.rect = { x: Math.min(d.startWorld.x, info.world.x), y: Math.min(d.startWorld.y, info.world.y), width: Math.abs(info.world.x - d.startWorld.x), height: Math.abs(info.world.y - d.startWorld.y) }
@@ -320,6 +324,8 @@ export const tools: Record<ToolId, Tool> = {
     onPointerDown(info, env, state) {
       const hit = (info.nodeId ? documentStore.getNode(info.nodeId) : null) ?? topHitAt(info.world)
       if (hit) {
+        if (info.shiftKey) env.setSelectionOutline(true)
+        else if (!env.selection.has(hit.id)) env.setSelectionOutline(false)
         const sel = info.shiftKey ? new Set(env.selection) : env.selection.has(hit.id) ? new Set(env.selection) : new Set<string>()
         if (info.shiftKey && sel.has(hit.id)) { sel.delete(hit.id); env.setSelection(sel); return }
         sel.add(hit.id)
@@ -333,7 +339,8 @@ export const tools: Record<ToolId, Tool> = {
       } else {
         const initialSelection = new Set(env.selection)
         if (!info.shiftKey) env.setSelection(new Set())
-        state.dragging = { type: 'marquee', startWorld: info.world, startScreen: info.screen, currentWorld: info.world, initialSelection, selectionMode: info.shiftKey ? 'box' : 'paint', paintedSelection: new Set(), paintTrail: [info.world] }
+        state.dragging = { type: 'marquee', startWorld: info.world, startScreen: info.screen, currentWorld: info.world, initialSelection, initialSelectionOutline: env.selectionOutline, selectionMode: info.shiftKey ? 'box' : 'paint', paintedSelection: new Set(), paintTrail: [info.world] }
+        env.setSelectionOutline(info.shiftKey)
         if (info.shiftKey) env.setMarquee({ ...info.world, width: 0, height: 0 })
         else env.setPaintTrail([info.world])
       }

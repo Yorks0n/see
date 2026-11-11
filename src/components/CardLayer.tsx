@@ -13,6 +13,7 @@ import { ArrangeMenu } from './ArrangeMenu'
 
 export function CardLayer(props: {
   doc: CanvasFile; camera: Camera; selection: Set<string>; setSelection: (s: Set<string>) => void
+  selectionOutline: boolean
   editingId: string | null; setEditingId: (id: string | null) => void; tool: ToolId
   onTextEditDone: (id: string, text: string) => void
   targetId?: string; cropId: string | null; onImageCrop: (node: ImageNode) => void
@@ -23,7 +24,7 @@ export function CardLayer(props: {
   const selectedNodes = (doc.nodes ?? []).filter((n) => selection.has(n.id))
   const active = props.tool === 'select'
   const connected = new Set((doc.edges ?? []).flatMap((e) => [e.fromNode, e.toNode]))
-  const multiple = selectedNodes.length > 1
+  const multiple = props.selectionOutline && selectedNodes.length > 1
   return <div className={`card-layer ${active ? '' : 'pass-through'} ${multiple ? 'multi-selection' : ''}`}>
     {(doc.nodes ?? []).map((node) => {
       const selected = selection.has(node.id), editing = props.editingId === node.id
@@ -52,7 +53,7 @@ export function CardLayer(props: {
       </div>
     })}
     {active && !props.interacting && selectedNodes.length > 0 && (props.editingId === null || (selectedNodes.length === 1 && selectedNodes[0].type === 'image')) && <SelectionBar {...props} nodes={selectedNodes} captionDraft={captionDraft} />}
-    {active && props.editingId === null && !props.cropId && !props.interacting && selectedNodes.length > 0 && <ResizeHandles nodes={selectedNodes} camera={camera} />}
+    {active && props.editingId === null && !props.cropId && !props.interacting && (selectedNodes.length === 1 || multiple) && <ResizeHandles nodes={selectedNodes} camera={camera} />}
   </div>
 }
 function SelectionBar(props: Parameters<typeof CardLayer>[0] & { nodes: CanvasNode[]; captionDraft: { id: string; text: string } | null }) {

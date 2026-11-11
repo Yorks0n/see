@@ -40,6 +40,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const redraw = useRef<() => void>(() => {})
   toolRef.current = props.tool
   const [selection, setSelection] = useState<Set<string>>(new Set())
+  const [selectionOutline, setSelectionOutline] = useState(false)
   const [edgeId, setEdgeId] = useState<string | null>(null)
   const [dragPreview, setDragPreview] = useState<ConnectionPreview | null>(null)
   const [marquee, setMarquee] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
@@ -54,9 +55,9 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const [error, setError] = useState('')
   const [listDrop, setListDrop] = useState<{ id: string; y: number } | null>(null)
   const [dragOver, setDragOver] = useState(false)
-  const sceneRef = useRef({ doc, camera, selection, marquee, paintTrail, activeStroke, drawStyle })
-  sceneRef.current = { doc, camera, selection, marquee, paintTrail, activeStroke, drawStyle }
-  const env: ToolEnv = { selection, setSelection, setDragPreview, setMarquee, setPaintTrail, addLaserPoint: (point, start) => laserRef.current.add(point, start), setEditingId, setTool: props.setTool, drawStyle }
+  const sceneRef = useRef({ doc, camera, selection, selectionOutline, marquee, paintTrail, activeStroke, drawStyle })
+  sceneRef.current = { doc, camera, selection, selectionOutline, marquee, paintTrail, activeStroke, drawStyle }
+  const env: ToolEnv = { selection, setSelection, selectionOutline, setSelectionOutline, setDragPreview, setMarquee, setPaintTrail, addLaserPoint: (point, start) => laserRef.current.add(point, start), setEditingId, setTool: props.setTool, drawStyle }
   const state = toolStateRef.current
   const cropNode = cropId ? doc.nodes?.find((n): n is ImageNode => n.id === cropId && n.type === 'image') : null
   useEffect(() => { if (cropId && (!selection.has(cropId) || selection.size !== 1 || props.tool !== 'select' || !cropNode)) setCropId(null) }, [selection, cropId, cropNode, props.tool])
@@ -109,7 +110,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     ro.observe(container); schedule()
     return () => { ro.disconnect(); cancelAnimationFrame(raf) }
   }, [])
-  useEffect(() => { redraw.current() }, [doc, camera, selection, marquee, paintTrail, activeStroke, drawStyle])
+  useEffect(() => { redraw.current() }, [doc, camera, selection, selectionOutline, marquee, paintTrail, activeStroke, drawStyle])
   const toPointerInfo = useCallback((e: { clientX: number; clientY: number; shiftKey: boolean; altKey?: boolean; target?: EventTarget | null }): PointerInfo => {
     const r = containerRef.current!.getBoundingClientRect()
     const screen = { x: e.clientX - r.left, y: e.clientY - r.top }
@@ -119,6 +120,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const cancel = useCallback(() => {
     const drag = toolStateRef.current.dragging
     if (drag?.type === 'marquee' || (drag?.type === 'move' && drag.initialSelection)) setSelection(new Set(drag.initialSelection))
+    if (drag?.type === 'marquee') setSelectionOutline(!!drag.initialSelectionOutline)
     toolStateRef.current.dragging = null
     laserRef.current.clear()
     documentStore.cancelInteraction()
@@ -418,7 +420,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     <LaserLayer trail={laserRef.current} />
     {listDrop && (() => { const list = doc.nodes?.find((n) => n.id === listDrop.id); return list && <><div className="list-drop-outline" style={{ left: list.x * camera.zoom + camera.x, top: list.y * camera.zoom + camera.y, width: list.width * camera.zoom, height: list.height * camera.zoom }} /><div className="list-insertion" style={{ left: (list.x + 12) * camera.zoom + camera.x, top: listDrop.y * camera.zoom + camera.y, width: (list.width - 24) * camera.zoom }} /></> })()}
     <ConnectionLayer doc={doc} camera={camera} preview={dragPreview} previewColor={defaultColors.connectionColor} selectedId={edgeId} onSelect={(id) => { setEdgeId(id); setSelection(new Set()) }} interactive={props.tool === 'select' && !interacting} />
-    <CardLayer doc={doc} camera={camera} selection={selection} setSelection={setSelection} editingId={editingId} setEditingId={setEditingId} onTextEditDone={onTextEditDone} tool={props.tool} targetId={dragPreview?.targetId} cropId={cropId} onImageCrop={(node) => setCropId((id) => id === node.id ? null : node.id)} interacting={interacting} />
+    <CardLayer doc={doc} camera={camera} selection={selection} setSelection={setSelection} selectionOutline={selectionOutline} editingId={editingId} setEditingId={setEditingId} onTextEditDone={onTextEditDone} tool={props.tool} targetId={dragPreview?.targetId} cropId={cropId} onImageCrop={(node) => setCropId((id) => id === node.id ? null : node.id)} interacting={interacting} />
     {props.tool === 'draw' && <div className="draw-settings floating-panel board-chrome" onPointerDown={(e) => e.stopPropagation()}><StylePalette color={drawStyle.color} onChange={(color) => setDrawStyle((s) => ({ ...s, color }))} /><StrokeWidths value={drawStyle.strokeWidth} onChange={(strokeWidth) => setDrawStyle((s) => ({ ...s, strokeWidth }))} /></div>}
     <CanvasControls boardRef={containerRef} doc={doc} camera={camera} uiVisible={props.uiVisible} onToggleUI={props.onToggleUI} onFit={fit} />
     {helpOpen && <ShortcutsDialog onClose={() => setHelpOpen(false)} />}
