@@ -3,6 +3,8 @@
   "name": "see-whiteboard",
   "main": "worker/index.ts",
   "compatibility_date": "2026-11-10",
+  "workers_dev": true,
+  "routes": [{ "pattern": "see.yorks0n.com", "custom_domain": true }],
   "assets": {
     "directory": "./dist",
     "binding": "SITE",
