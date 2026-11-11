@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Cursor, Hand, ImageSquare, PencilSimple, Plus, UploadSimple, X, List, SidebarSimple, DotsThree, SquaresFour, Rectangle } from './icons'
+import { Cursor, Hand, ImageSquare, PencilSimple, Plus, UploadSimple, X, List, SidebarSimple, DotsThree, SquaresFour, Rectangle, Sparkle } from './icons'
 import { exportCanvasFile, importCanvasFile, requestPersistentStorage, saveLocal } from '../persistence'
 import { documentStore } from '../store/document'
 import { createImageCard, viewportCenterWorld, type ToolId } from '../tools/tools'
@@ -15,6 +15,7 @@ const TOOLS = [
   { id: 'select' as const, label: '选择', icon: Cursor },
   { id: 'hand' as const, label: '平移', icon: Hand },
   { id: 'draw' as const, label: '自由手绘', icon: PencilSimple },
+  { id: 'laser' as const, label: '激光笔', icon: Sparkle },
   { id: 'box' as const, label: '分组框', icon: SquaresFour },
   { id: 'list' as const, label: '绘制列表', icon: List },
 ]

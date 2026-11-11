@@ -18,6 +18,8 @@ import { runBoardCommand, type BoardCommand } from '../shortcuts'
 import { selectionSVG, svgPNG, downloadBlob } from '../tools/export'
 import { ShortcutsDialog } from './ShortcutsDialog'
 import { CanvasContextMenu, type ContextTarget } from './CanvasContextMenu'
+import { LaserTrail } from '../tools/laser'
+import { LaserLayer } from './LaserLayer'
 
 const IMAGE_URL_RE = /^https?:\/\/\S+\.(png|jpe?g|gif|webp|avif|svg|bmp)(\?\S*)?$/i
 const isTypingTarget = (e: Event) => { const t = e.target as HTMLElement | null; return !!t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) }
@@ -29,6 +31,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const containerRef = useRef<HTMLDivElement>(null)
   const boardTopRef = useRef<number | null>(null)
   const toolStateRef = useRef(new ToolState())
+  const laserRef = useRef(new LaserTrail())
   const dragToolRef = useRef<ToolId>('select')
   const toolRef = useRef(props.tool)
   const spaceRestoreRef = useRef<ToolId | null>(null)
@@ -53,7 +56,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const [dragOver, setDragOver] = useState(false)
   const sceneRef = useRef({ doc, camera, selection, marquee, paintTrail, activeStroke, drawStyle })
   sceneRef.current = { doc, camera, selection, marquee, paintTrail, activeStroke, drawStyle }
-  const env: ToolEnv = { selection, setSelection, setDragPreview, setMarquee, setPaintTrail, setEditingId, setTool: props.setTool, drawStyle }
+  const env: ToolEnv = { selection, setSelection, setDragPreview, setMarquee, setPaintTrail, addLaserPoint: (point, start) => laserRef.current.add(point, start), setEditingId, setTool: props.setTool, drawStyle }
   const state = toolStateRef.current
   const cropNode = cropId ? doc.nodes?.find((n): n is ImageNode => n.id === cropId && n.type === 'image') : null
   useEffect(() => { if (cropId && (!selection.has(cropId) || selection.size !== 1 || props.tool !== 'select' || !cropNode)) setCropId(null) }, [selection, cropId, cropNode, props.tool])
@@ -117,6 +120,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     const drag = toolStateRef.current.dragging
     if (drag?.type === 'marquee') setSelection(new Set(drag.initialSelection))
     toolStateRef.current.dragging = null
+    laserRef.current.clear()
     documentStore.cancelInteraction()
     if (draftCardRef.current) {
       const id = draftCardRef.current
@@ -152,7 +156,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     containerRef.current?.setPointerCapture(e.pointerId)
     setEdgeId(null)
     if (e.button === 1 || props.tool === 'hand') { dragToolRef.current = 'hand'; tools.hand.onPointerDown?.(info, env, state); setInteracting(true); return }
-    documentStore.beginInteraction()
+    if (props.tool !== 'laser') documentStore.beginInteraction()
     const connectId = (e.target as Element).closest<HTMLElement>('[data-connect-id]')?.dataset.connectId
     if (connectId && props.tool === 'select') { startConnection(connectId, info, env, state); setInteracting(true); return }
     dragToolRef.current = props.tool
@@ -175,8 +179,8 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     }
     lastScreenRef.current = (e.target as Element).closest('.floating-panel, .board-chrome') ? null : info.screen
     if (state.dragging?.type === 'connect') moveConnection(info, env, state)
-    else if (state.dragging?.type === 'draw' || state.dragging?.type === 'marquee') {
-      const tool = state.dragging.type === 'draw' ? tools.draw : tools.select
+    else if (state.dragging?.type === 'draw' || state.dragging?.type === 'marquee' || state.dragging?.type === 'laser') {
+      const tool = state.dragging.type === 'marquee' ? tools.select : tools[state.dragging.type]
       const points = e.nativeEvent.getCoalescedEvents?.() ?? []
       for (const p of points) tool.onPointerMove?.(toPointerInfo(p), env, state)
       tool.onPointerMove?.(info, env, state)
@@ -186,10 +190,10 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   const onPointerUp = (e: React.PointerEvent) => {
     if (!state.dragging) return
     const info = toPointerInfo(e)
-    const panning = state.dragging.type === 'pan'
+    const transient = state.dragging.type === 'pan' || state.dragging.type === 'laser'
     if (state.dragging.type === 'connect') finishConnection(info, env, state)
     else tools[dragToolRef.current].onPointerUp?.(info, env, state)
-    if (!panning) documentStore.endInteraction()
+    if (!transient) documentStore.endInteraction()
     if (containerRef.current?.hasPointerCapture(e.pointerId)) containerRef.current.releasePointerCapture(e.pointerId)
     setActiveStroke(null); setInteracting(false)
     setListDrop(null)
@@ -253,7 +257,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
       if (mod) return
       if (state.dragging) return
       if (key === 't') { e.preventDefault(); runBoardCommand('text'); return }
-      const map: Record<string, ToolId> = { v: 'select', '1': 'select', h: 'hand', '2': 'hand', b: 'box', '3': 'box', d: 'draw', '4': 'draw', l: 'list' }
+      const map: Record<string, ToolId> = { v: 'select', '1': 'select', h: 'hand', '2': 'hand', b: 'box', '3': 'box', d: 'draw', '4': 'draw', l: 'list', k: 'laser' }
       if (map[key]) { props.setTool(map[key]); return }
       if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); if (edgeId) { documentStore.deleteEdge(edgeId); setEdgeId(null) } else { deleteNodes(selection); setSelection(new Set()) } return }
       if (e.key === 'Enter' && selection.size === 1) {
@@ -408,6 +412,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragOver(true) } }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false) }}
     onDrop={(e) => { e.preventDefault(); setDragOver(false); setSelection(new Set()); addFiles(Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/')), toPointerInfo(e).world) }}>
     <canvas ref={staticRef} className="canvas static" /><canvas ref={interactiveRef} className="canvas interactive" />
+    <LaserLayer trail={laserRef.current} />
     {listDrop && (() => { const list = doc.nodes?.find((n) => n.id === listDrop.id); return list && <><div className="list-drop-outline" style={{ left: list.x * camera.zoom + camera.x, top: list.y * camera.zoom + camera.y, width: list.width * camera.zoom, height: list.height * camera.zoom }} /><div className="list-insertion" style={{ left: (list.x + 12) * camera.zoom + camera.x, top: listDrop.y * camera.zoom + camera.y, width: (list.width - 24) * camera.zoom }} /></> })()}
     <ConnectionLayer doc={doc} camera={camera} preview={dragPreview} previewColor={defaultColors.connectionColor} selectedId={edgeId} onSelect={(id) => { setEdgeId(id); setSelection(new Set()) }} interactive={props.tool === 'select' && !interacting} />
     <CardLayer doc={doc} camera={camera} selection={selection} setSelection={setSelection} editingId={editingId} setEditingId={setEditingId} onTextEditDone={onTextEditDone} tool={props.tool} targetId={dragPreview?.targetId} cropId={cropId} onImageCrop={(node) => setCropId((id) => id === node.id ? null : node.id)} interacting={interacting} />

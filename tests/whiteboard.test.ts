@@ -10,6 +10,7 @@ import { arrangeNodes, createImageCard, createList, createTextCard, duplicateNod
 import { arrangement, ARRANGE_GAP } from '../src/tools/layout'
 import { selectionSVG } from '../src/tools/export'
 import { SHORTCUTS } from '../src/shortcuts'
+import { LASER_LIFETIME, LaserTrail } from '../src/tools/laser'
 import { deleteLocalFile, importCanvasFile, initializeLocal, loadLocal, saveCanvas, saveLocal, saveRecovery, setActiveFile } from '../src/persistence'
 import { LIBRARY_KEY, LibraryStore } from '../src/store/library'
 import { cropImage, uncroppedBounds, type CropHandle } from '../src/tools/imageCrop'
@@ -26,9 +27,46 @@ const card = (id: string, x = 20, y = 20): TextNode => ({ id, type: 'text', x, y
 const frame = (ids = ['a', 'b']): GroupNode => ({ id: 'group', type: 'group', x: 0, y: 0, width: 350, height: 250, label: 'Ideas', memberIds: ids })
 const pointer = (x: number, y: number, nodeId?: string): PointerInfo => ({ world: { x, y }, screen: { x, y }, shiftKey: false, nodeId })
 function environment(selection = new Set<string>()): ToolEnv {
-  const env: ToolEnv = { selection, setSelection: (next) => { env.selection = next }, setDragPreview: () => {}, setMarquee: () => {}, setPaintTrail: () => {}, setEditingId: () => {}, setTool: () => {}, drawStyle: { color: '5', strokeWidth: 4 } }
+  const env: ToolEnv = { selection, setSelection: (next) => { env.selection = next }, setDragPreview: () => {}, setMarquee: () => {}, setPaintTrail: () => {}, addLaserPoint: () => {}, setEditingId: () => {}, setTool: () => {}, drawStyle: { color: '5', strokeWidth: 4 } }
   return env
 }
+
+test('laser gestures leave document, selection and undo history untouched and separate strokes', () => {
+  documentStore.load({ nodes: [card('a')] })
+  documentStore.updateNode('a', { text: 'changed' })
+  const before = documentStore.toJSON(), env = environment(new Set(['a'])), state = new ToolState()
+  const trail = new LaserTrail()
+  env.addLaserPoint = (point, start) => trail.add(point, start, 0)
+  tools.laser.onPointerMove!(pointer(0, 0), env, state)
+  assert.equal(trail.points.length, 0)
+  for (const x of [20, 200]) {
+    tools.laser.onPointerDown!(pointer(x, 20, 'a'), env, state)
+    tools.laser.onPointerMove!(pointer(x + 10, 30), env, state)
+    tools.laser.onPointerUp!(pointer(x + 20, 40), env, state)
+    assert.equal(state.dragging, null)
+  }
+  assert.deepEqual(trail.points.map((point) => point.start), [true, false, false, true, false, false])
+  assert.deepEqual(documentStore.toJSON(), before)
+  assert.deepEqual([...env.selection], ['a'])
+  documentStore.undo()
+  assert.equal((documentStore.getNode('a') as TextNode).text, 'a')
+})
+
+test('laser points expire independently and cancellation clears all trails', () => {
+  const trail = new LaserTrail()
+  trail.add({ x: 0, y: 0 }, true, 0)
+  trail.add({ x: 50, y: 20 }, false, 300)
+  trail.prune(LASER_LIFETIME)
+  assert.equal(trail.points.length, 1)
+  assert.equal(trail.points[0].x, 50)
+  trail.prune(LASER_LIFETIME + 300)
+  assert.equal(trail.points.length, 0)
+  trail.add({ x: 10, y: 10 }, true, 2000)
+  trail.clear()
+  assert.equal(trail.points.length, 0)
+  assert.equal(SHORTCUTS.find((s) => s.id === 'laser')?.keys, 'K')
+  assert.equal(SHORTCUTS.find((s) => s.id === 'list')?.keys, 'L')
+})
 
 test('rectangle tool creates click and reverse-drag shapes, moves independently, and supports cancel and undo', () => {
   documentStore.load({ nodes: [card('inside', 120, 120)] })

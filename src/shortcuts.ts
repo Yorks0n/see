@@ -4,6 +4,7 @@ export const SHORTCUTS = [
   { id: 'hand', group: '工具', label: '平移', keys: 'H / 2' },
   { id: 'box', group: '工具', label: '分组框', keys: 'B / 3' },
   { id: 'draw', group: '工具', label: '自由手绘', keys: 'D / 4' },
+  { id: 'laser', group: '工具', label: '激光笔', keys: 'K' },
   { id: 'list', group: '工具', label: '绘制列表', keys: 'L' },
   { id: 'text', group: '工具', label: '新建文本块', keys: 'T / 双击空白' },
   { id: 'pan', group: '画布', label: '临时平移', keys: '按住空格拖动 / 鼠标中键拖动' },

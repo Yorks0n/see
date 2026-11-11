@@ -5,7 +5,7 @@ import { hitTest } from '../render/renderer'
 import type { CanvasColor, CanvasNode, DrawNode, DrawPoint, GroupNode, ImageNode, RectangleNode, TextNode } from '../types'
 import { arrangement, type ArrangeMode } from './layout'
 
-export type ToolId = 'select' | 'box' | 'draw' | 'hand' | 'list' | 'rectangle'
+export type ToolId = 'select' | 'box' | 'draw' | 'hand' | 'list' | 'rectangle' | 'laser'
 export interface DrawStyle { color?: CanvasColor; strokeWidth: number }
 export interface ToolEnv {
   selection: Set<string>
@@ -13,6 +13,7 @@ export interface ToolEnv {
   setDragPreview: (p: { fromId: string; to: { x: number; y: number }; targetId?: string } | null) => void
   setMarquee: (m: { x: number; y: number; width: number; height: number } | null) => void
   setPaintTrail: (points: DrawPoint[] | null) => void
+  addLaserPoint: (point: DrawPoint, start: boolean) => void
   setEditingId: (id: string | null) => void
   setTool: (t: ToolId) => void
   drawStyle: DrawStyle
@@ -24,7 +25,7 @@ export interface PointerInfo {
   nodeId?: string
 }
 interface DragState {
-  type: 'pan' | 'move' | 'marquee' | 'connect' | 'box' | 'draw' | 'rectangle'
+  type: 'pan' | 'move' | 'marquee' | 'connect' | 'box' | 'draw' | 'rectangle' | 'laser'
   startWorld: { x: number; y: number }
   startScreen: { x: number; y: number }
   originCamera?: { x: number; y: number }
@@ -286,6 +287,20 @@ function updateSelectionDrag(info: PointerInfo, env: ToolEnv, state: ToolState) 
 }
 
 export const tools: Record<ToolId, Tool> = {
+  laser: {
+    id: 'laser',
+    onPointerDown(info, env, state) {
+      state.dragging = { type: 'laser', startWorld: info.world, startScreen: info.screen }
+      env.addLaserPoint(info.world, true)
+    },
+    onPointerMove(info, env, state) {
+      if (state.dragging?.type === 'laser') env.addLaserPoint(info.world, false)
+    },
+    onPointerUp(info, env, state) {
+      if (state.dragging?.type === 'laser') env.addLaserPoint(info.world, false)
+      state.dragging = null
+    },
+  },
   hand: {
     id: 'hand',
     onPointerDown(info, _env, state) {
