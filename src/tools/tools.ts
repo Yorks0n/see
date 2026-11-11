@@ -22,6 +22,7 @@ export interface PointerInfo {
   screen: { x: number; y: number }
   world: { x: number; y: number }
   shiftKey: boolean
+  altKey?: boolean
   nodeId?: string
 }
 interface DragState {
@@ -39,6 +40,7 @@ interface DragState {
   rect?: { x: number; y: number; width: number; height: number }
   points?: { x: number; y: number }[]
   moved?: boolean
+  duplicateSelection?: Set<string>
 }
 export class ToolState { dragging: DragState | null = null }
 export interface Tool {
@@ -81,7 +83,7 @@ export function viewportCenterWorld() {
   const board = document.querySelector('.board') as HTMLElement | null
   return cameraStore.screenToWorld((board?.clientWidth ?? window.innerWidth) / 2, (board?.clientHeight ?? window.innerHeight) / 2)
 }
-export function duplicateNodes(ids: Set<string>): Set<string> {
+export function duplicateNodes(ids: Set<string>, offset = 24): Set<string> {
   const now = documentStore.getSnapshot()
   const all = expandSelection(ids)
   const idMap = new Map([...all].map((id) => [id, uid()]))
@@ -89,7 +91,7 @@ export function duplicateNodes(ids: Set<string>): Set<string> {
     for (const n of now.nodes ?? []) {
       const id = idMap.get(n.id)
       if (!id) continue
-      const copy = { ...n, id, x: n.x + 24, y: n.y + 24 }
+      const copy = { ...n, id, x: n.x + offset, y: n.y + offset }
       if (copy.type === 'group') copy.memberIds = (copy.memberIds ?? []).map((member) => idMap.get(member)).filter((member): member is string => !!member)
       documentStore.addNode(copy)
     }
@@ -327,7 +329,7 @@ export const tools: Record<ToolId, Tool> = {
           const n = documentStore.getNode(id)
           if (n) origins.set(id, { x: n.x, y: n.y })
         }
-        state.dragging = { type: 'move', startWorld: info.world, startScreen: info.screen, origins, moved: false }
+        state.dragging = { type: 'move', startWorld: info.world, startScreen: info.screen, origins, moved: false, duplicateSelection: info.altKey ? sel : undefined }
       } else {
         const initialSelection = new Set(env.selection)
         if (!info.shiftKey) env.setSelection(new Set())
@@ -341,6 +343,16 @@ export const tools: Record<ToolId, Tool> = {
       if (d?.type === 'move' && d.origins) {
         let dx = info.world.x - d.startWorld.x, dy = info.world.y - d.startWorld.y
         if (Math.hypot(info.screen.x - d.startScreen.x, info.screen.y - d.startScreen.y) > 3) d.moved = true
+        if (d.moved && d.duplicateSelection) {
+          d.initialSelection = d.duplicateSelection
+          const copies = duplicateNodes(d.duplicateSelection, 0)
+          d.duplicateSelection = undefined
+          env.setSelection(copies)
+          d.origins = new Map([...expandSelection(copies)].map((id) => {
+            const node = documentStore.getNode(id)!
+            return [id, { x: node.x, y: node.y }]
+          }))
+        }
         if (info.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0 }
         if (d.moved) documentStore.updateNodes(new Map([...d.origins].map(([id, origin]) => [id, { x: Math.round(origin.x + dx), y: Math.round(origin.y + dy) }])))
       } else if (d?.type === 'marquee') {
@@ -349,6 +361,7 @@ export const tools: Record<ToolId, Tool> = {
     },
     onPointerUp(info, env, state) {
       const d = state.dragging
+      if (d?.type === 'move') tools.select.onPointerMove?.(info, env, state)
       if (d?.type === 'marquee') {
         updateSelectionDrag(info, env, state)
         env.setMarquee(null); env.setPaintTrail(null)

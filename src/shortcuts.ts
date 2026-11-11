@@ -19,6 +19,7 @@ export const SHORTCUTS = [
   { id: 'paste', group: '编辑', label: '粘贴', keys: 'Mod + V' },
   { id: 'copy-svg', group: '编辑', label: '复制为 SVG', keys: 'Mod + Shift + C' },
   { id: 'duplicate', group: '编辑', label: '创建副本', keys: 'Mod + D' },
+  { id: 'duplicate-drag', group: '编辑', label: '拖动创建副本', keys: 'Option / Alt + 拖动选中内容' },
   { id: 'select-all', group: '编辑', label: '全选', keys: 'Mod + A' },
   { id: 'group', group: '编辑', label: '组合', keys: 'Mod + G' },
   { id: 'ungroup', group: '编辑', label: '取消组合 / 解散列表', keys: 'Mod + Shift + G' },

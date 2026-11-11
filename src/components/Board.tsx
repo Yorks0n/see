@@ -110,15 +110,15 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     return () => { ro.disconnect(); cancelAnimationFrame(raf) }
   }, [])
   useEffect(() => { redraw.current() }, [doc, camera, selection, marquee, paintTrail, activeStroke, drawStyle])
-  const toPointerInfo = useCallback((e: { clientX: number; clientY: number; shiftKey: boolean; target?: EventTarget | null }): PointerInfo => {
+  const toPointerInfo = useCallback((e: { clientX: number; clientY: number; shiftKey: boolean; altKey?: boolean; target?: EventTarget | null }): PointerInfo => {
     const r = containerRef.current!.getBoundingClientRect()
     const screen = { x: e.clientX - r.left, y: e.clientY - r.top }
     const nodeId = e.target instanceof Element ? e.target.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId : undefined
-    return { screen, world: cameraStore.screenToWorld(screen.x, screen.y), shiftKey: e.shiftKey, nodeId }
+    return { screen, world: cameraStore.screenToWorld(screen.x, screen.y), shiftKey: e.shiftKey, altKey: e.altKey, nodeId }
   }, [])
   const cancel = useCallback(() => {
     const drag = toolStateRef.current.dragging
-    if (drag?.type === 'marquee') setSelection(new Set(drag.initialSelection))
+    if (drag?.type === 'marquee' || (drag?.type === 'move' && drag.initialSelection)) setSelection(new Set(drag.initialSelection))
     toolStateRef.current.dragging = null
     laserRef.current.clear()
     documentStore.cancelInteraction()
@@ -153,7 +153,8 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
     if (focused?.isContentEditable) focused.blur()
     const info = toPointerInfo(e)
     lastScreenRef.current = info.screen
-    containerRef.current?.setPointerCapture(e.pointerId)
+    // Capturing a label click here would retarget its double-click to the board.
+    if (e.button !== 0 || !(e.target as Element).closest('.group-label')) containerRef.current?.setPointerCapture(e.pointerId)
     setEdgeId(null)
     if (e.button === 1 || props.tool === 'hand') { dragToolRef.current = 'hand'; tools.hand.onPointerDown?.(info, env, state); setInteracting(true); return }
     if (props.tool !== 'laser') documentStore.beginInteraction()
@@ -166,6 +167,8 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
   }
   const onPointerMove = (e: React.PointerEvent) => {
     const info = toPointerInfo(e)
+    const drag = state.dragging
+    if (drag?.type === 'move' && Math.hypot(info.screen.x - drag.startScreen.x, info.screen.y - drag.startScreen.y) > 3) containerRef.current?.setPointerCapture(e.pointerId)
     if (state.dragging?.type === 'move' && state.dragging.origins) {
       const moved = state.dragging.origins
       const canDrop = [...moved.keys()].every((id) => ['text', 'image'].includes(documentStore.getNode(id)?.type ?? ''))
