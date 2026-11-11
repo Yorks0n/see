@@ -77,12 +77,18 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
       saveTimer = 0
       if (persistenceStore.getSnapshot().state !== 'conflict') void saveLocal().catch(() => {})
     }
-    const scheduleSave = () => {
-      markDirty()
+    const scheduleSave = (viewOnly = false) => {
+      markDirty(viewOnly)
       // Do not postpone indefinitely while typing or dragging.
       if (!saveTimer) saveTimer = window.setTimeout(save, 250)
     }
-    const unsubDoc = documentStore.subscribe(scheduleSave), unsubCam = cameraStore.subscribe(scheduleSave)
+    let previousDoc = documentStore.getSnapshot()
+    const unsubDoc = documentStore.subscribe(() => {
+      const next = documentStore.getSnapshot()
+      if (next.nodes === previousDoc.nodes && next.edges === previousDoc.edges && next.meta === previousDoc.meta) return
+      previousDoc = next
+      scheduleSave()
+    }), unsubCam = cameraStore.subscribe(() => scheduleSave(true))
     const flush = () => { clearTimeout(saveTimer); saveRecovery(); save() }
     const onVisibility = () => { if (document.visibilityState === 'hidden') flush() }
     const beforeUnload = (event: BeforeUnloadEvent) => {

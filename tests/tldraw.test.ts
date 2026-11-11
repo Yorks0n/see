@@ -10,7 +10,7 @@ const shape = (id: string, type: string, props = {}, extra = {}) => ({
 const page = { id: 'page:one', typeName: 'page', name: '第一页', index: 'a1' }
 const file = (records: unknown[]) => ({ tldrawFileFormatVersion: 1, schema: { schemaVersion: 2, sequences: {} }, records: [page, ...records] })
 
-test('opens .tldr files and store snapshots, preserving the source through see reload', async () => {
+test('opens .tldr files and store snapshots, retaining only converted content through see reload', async () => {
   const source = file([
     { id: 'document:document', typeName: 'document', name: '导入示例' },
     shape('text', 'text', { richText: { type: 'doc', content: [
@@ -29,7 +29,9 @@ test('opens .tldr files and store snapshots, preserving the source through see r
   const store = new DocumentStore()
   store.load(imported)
   const exported = store.toJSON()
-  assert.deepEqual(exported.meta?.tldraw?.source, source)
+  assert.equal((exported.nodes?.[0] as any).text, '你好\n- 第二行')
+  assert.deepEqual(exported.meta?.tldraw, { warnings: imported.meta?.tldraw?.warnings })
+  assert.equal(JSON.stringify(exported).includes('"marks"'), false)
   for (const snapshot of [{ store: Object.fromEntries(source.records.map((r: any) => [r.id, r])), schema: source.schema },
     { document: { store: Object.fromEntries(source.records.map((r: any) => [r.id, r])), schema: source.schema } }]) {
     assert.deepEqual(importTldraw(snapshot)?.nodes, imported.nodes)
@@ -62,6 +64,14 @@ test('retains embedded image dimensions and crop and warns about missing assets'
   assert.equal((doc.nodes![0] as any).text, '图片说明')
   assert.match((doc.nodes![1] as any).text, /缺失图片/)
   assert.ok(doc.meta!.tldraw!.warnings.some((w) => w.includes('缺少资源')))
+})
+
+test('reports unsupported properties without claiming to preserve their source', () => {
+  const doc = importTldraw(file([
+    { id: 'asset:photo', typeName: 'asset', type: 'image', props: { src: 'data:image/png;base64,aGk=' } },
+    shape('photo', 'image', { assetId: 'asset:photo', flipX: true, crop: { isCircle: true } }, { isLocked: true, opacity: 0.5, rotation: 0.5 }),
+  ]))!
+  assert.deepEqual(doc.meta!.tldraw, { warnings: ['未导入锁定和透明度', '未导入图片旋转、翻转和圆形裁剪'] })
 })
 
 test('imports current and legacy arrow bindings and keeps unbound arrows visible', () => {

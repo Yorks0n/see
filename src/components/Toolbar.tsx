@@ -120,7 +120,7 @@ export function Toolbar(props: { tool: ToolId; setTool: (t: ToolId) => void; onS
         const name = typeof doc.meta?.name === 'string' && doc.meta.name.trim() ? doc.meta.name : file.name.replace(/\.(canvas|tldr|json)$/i, '')
         return libraryStore.createFile(name, doc).then(() => {
           const warnings = doc.meta?.tldraw?.warnings
-          setError(warnings?.length ? `已导入。${warnings.join('；')}。原始 tldraw 数据已随白板保留。` : '')
+          setError(warnings?.length ? `已导入。${warnings.join('；')}。` : '')
         })
       }).catch((error: Error) => setError(`导入失败：${error.message}`))
       e.target.value = ''

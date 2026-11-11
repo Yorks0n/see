@@ -9,10 +9,10 @@ let activeFileId = 'legacy-default'
 const savedDocuments = new Map<string, string>()
 const pendingSaves = new Map<string, Promise<void>>()
 type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict'
-let status: { state: SaveState; message: string } = { state: 'saved', message: '' }
+let status: { state: SaveState; message: string; viewOnly: boolean } = { state: 'saved', message: '', viewOnly: false }
 const listeners = new Set<() => void>()
-function publish(state: SaveState, message = '') {
-  status = { state, message }
+function publish(state: SaveState, message = '', viewOnly = false) {
+  status = { state, message, viewOnly }
   listeners.forEach((listener) => listener())
 }
 export const persistenceStore = {
@@ -29,8 +29,8 @@ export function markLoaded() {
   savedDocuments.set(activeFileId, JSON.stringify(currentCanvas()))
   publish('saved')
 }
-export function markDirty() {
-  if (status.state !== 'error' && status.state !== 'conflict') publish('dirty')
+export function markDirty(viewOnly = false) {
+  if (status.state !== 'error' && status.state !== 'conflict') publish('dirty', '', viewOnly && (status.state === 'saved' || status.viewOnly))
 }
 export function reportSaveError(error: unknown) {
   const message = error instanceof StorageConflictError ? error.message
@@ -59,11 +59,14 @@ async function flushLocal(id: string): Promise<void> {
       if (id === activeFileId) publish('saved')
       return
     }
-    publish('saving')
+    publish('saving', '', status.viewOnly)
     try {
       await localRepository.save(id, doc)
       savedDocuments.set(id, serialized)
-      if (id === activeFileId) publish(serialized === JSON.stringify(currentCanvas()) ? 'saved' : 'dirty')
+      if (id === activeFileId) {
+        const saved = serialized === JSON.stringify(currentCanvas())
+        publish(saved ? 'saved' : 'dirty', '', !saved && status.viewOnly)
+      }
     } catch (error) {
       if (id === activeFileId) { saveRecovery(); reportSaveError(error) }
       throw error

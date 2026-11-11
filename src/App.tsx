@@ -29,6 +29,24 @@ export default function App() {
     // Do not accept edits to the old document while a file is being loaded.
     appRef.current?.toggleAttribute('inert', library.busy)
   }, [library.busy, library.ready])
+  useLayoutEffect(() => {
+    const app = appRef.current, viewport = window.visualViewport
+    if (!app || !viewport) return
+    const update = () => {
+      // The keyboard can resize and pan the visible area without resizing the page.
+      app.style.width = `${viewport.width}px`
+      app.style.height = `${viewport.height}px`
+      app.style.left = `${viewport.offsetLeft}px`
+      app.style.top = `${viewport.offsetTop}px`
+    }
+    update()
+    viewport.addEventListener('resize', update)
+    viewport.addEventListener('scroll', update)
+    return () => {
+      viewport.removeEventListener('resize', update)
+      viewport.removeEventListener('scroll', update)
+    }
+  }, [library.ready])
 
   if (!library.ready) return <div className="app-loading" role="status">{error || '正在打开白板…'}{error && <button onClick={() => {
     setError('')

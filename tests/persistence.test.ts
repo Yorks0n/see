@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
 import { LocalRepository, portableCanvas, RECOVERY_PREFIX, StorageConflictError } from '../src/storage/local'
 import { documentStore } from '../src/store/document'
+import { cameraStore } from '../src/store/camera'
+import { saveStatusIndicator } from '../src/components/SaveStatus'
 import { importCanvasFile, loadLocal, markDirty, persistenceStore, saveLocal, serializeCanvasFile, setActiveFile } from '../src/persistence'
 import type { CanvasFile } from '../src/types'
 
@@ -64,7 +66,7 @@ test('downloaded canvas restores every main content state, order, camera and emb
         { id: 'group', type: 'group', x: -200, y: -100, width: 1200, height: 800, label: '分组', memberIds: ['list', 'rect'], color: '5', background: url, backgroundStyle: 'ratio' },
       ],
       edges: [{ id: 'edge', fromNode: 'text', toNode: 'photo', fromSide: 'right', toSide: 'left', fromEnd: 'none', toEnd: 'arrow', color: '#abcdef', label: '隐藏的标签', labelIsVisible: false, labelOffset: { x: 12, y: -8 }, lineStyle: 'straight' }],
-      meta: { name: '状态备份', camera: { x: -45, y: 70, zoom: 0.75 }, tldraw: { source: { records: [{ id: 'source' }] }, warnings: ['原始数据'] } },
+      meta: { name: '状态备份', camera: { x: -45, y: 70, zoom: 0.75 }, tldraw: { warnings: ['文字与便签使用 see 排版，字体、旋转和部分富文本样式可能不同'] } },
     })
     const before = documentStore.toJSON()
     const serialized = await serializeCanvasFile(before)
@@ -80,6 +82,28 @@ test('downloaded canvas restores every main content state, order, camera and emb
     assert.deepEqual(before.nodes!.map((n) => n.id), after.nodes!.map((n) => n.id))
     assert.equal((before.nodes!.find((n) => n.id === 'photo') as any).url, url)
   } finally { URL.revokeObjectURL(url) }
+})
+
+test('tldraw imports save and export converted content without unsupported source data', async () => {
+  const source = {
+    tldrawFileFormatVersion: 1,
+    records: [
+      { id: 'page:one', typeName: 'page', name: '第一页', index: 'a1' },
+      { id: 'custom', typeName: 'shape', type: 'custom-widget', x: 10, y: 20, parentId: 'page:one', index: 'a1', props: { text: '可用内容', unsupportedPayload: 'discard-this-payload' } },
+    ],
+  }
+  const imported = await importCanvasFile(new File([JSON.stringify(source)], 'board.tldr'))
+  const repository = new LocalRepository()
+  await repository.save('imported', imported)
+  const saved = await inspect('kv', 'canvas:imported')
+  assert.equal(JSON.stringify(saved).includes('discard-this-payload'), false)
+  const restored = await new LocalRepository().load('imported')
+  const serialized = await serializeCanvasFile(restored!)
+  assert.equal(serialized.includes('discard-this-payload'), false)
+  assert.equal(serialized.includes('"source"'), false)
+  const exported = await importCanvasFile(new File([serialized], 'board.canvas'))
+  assert.equal((exported.nodes![0] as any).text, '可用内容')
+  assert.deepEqual(exported.meta!.tldraw, { warnings: ['不支持的 custom-widget 已保留为占位卡片'] })
 })
 
 async function database(name = 'whiteboard-db', version = 2) {
@@ -303,6 +327,75 @@ test('local view saves persist without notifying sync subscribers, while content
     await repo.delete('board')
     assert.equal(changes, 4)
   } finally { unsubscribe() }
+})
+
+test('camera-only saves remain marked as view changes through pending local writes', async () => {
+  setActiveFile('view-save-status')
+  await loadLocal()
+  documentStore.load(canvas())
+  await saveLocal()
+  const updates: ReturnType<typeof persistenceStore.getSnapshot>[] = []
+  const unsubscribe = persistenceStore.subscribe(() => updates.push(persistenceStore.getSnapshot()))
+  try {
+    cameraStore.set({ x: 160, y: -90, zoom: 2 })
+    markDirty(true)
+    assert.equal(persistenceStore.getSnapshot().viewOnly, true)
+    await saveLocal()
+    assert.ok(updates.some((update) => update.state === 'saving'))
+    assert.ok(updates.filter((update) => update.state !== 'saved').every((update) => update.viewOnly))
+    assert.deepEqual((await loadLocal())!.meta!.camera, cameraStore.getSnapshot())
+    assert.equal(persistenceStore.getSnapshot().state, 'saved')
+
+    cameraStore.set({ x: 180 })
+    markDirty(true)
+    const pending = saveLocal()
+    documentStore.updateNode('text', { text: 'content changed during a view save' })
+    markDirty()
+    cameraStore.set({ x: 200 })
+    markDirty(true)
+    assert.equal(persistenceStore.getSnapshot().viewOnly, false)
+    await pending
+    assert.equal(((await loadLocal())!.nodes![0] as any).text, 'content changed during a view save')
+    assert.equal(persistenceStore.getSnapshot().state, 'saved')
+  } finally { unsubscribe() }
+})
+
+test('view changes stay green when synced, while cloud failures are red even during local saves', () => {
+  const synced = { enabled: true, state: 'synced' as const, message: '', username: 'owner' }
+  for (const state of ['dirty', 'saving'] as const) {
+    const view = { state, viewOnly: true, message: '' }
+    assert.deepEqual(saveStatusIndicator(view, synced), { state: 'saved', label: '已同步到云端', title: '已同步到云端' })
+    assert.equal(saveStatusIndicator(view, { ...synced, enabled: false, state: 'local' }).state, 'saved')
+    assert.equal(saveStatusIndicator(view, { ...synced, state: 'syncing' }).state, 'dirty')
+    assert.equal(saveStatusIndicator(view, { ...synced, state: 'offline' }).state, 'dirty')
+    assert.deepEqual(saveStatusIndicator(view, { ...synced, state: 'error', message: '服务器拒绝同步' }), {
+      state: 'error', label: '已保存到本机，同步失败', title: '服务器拒绝同步',
+    })
+    const content = { ...view, viewOnly: false }
+    assert.equal(saveStatusIndicator(content, synced).state, state)
+    assert.equal(saveStatusIndicator(content, { ...synced, state: 'error' }).state, 'error')
+  }
+  for (const state of ['error', 'conflict'] as const) {
+    assert.deepEqual(saveStatusIndicator({ state, viewOnly: false, message: '本地保存出错' }, { ...synced, state: 'error', message: '云端同步出错' }), {
+      state, label: state === 'error' ? '保存失败' : '保存冲突', title: '本地保存出错',
+    })
+  }
+})
+
+test('a failed camera-only local save still reports an error', async () => {
+  setActiveFile('view-save-error')
+  await loadLocal()
+  documentStore.load(canvas())
+  await saveLocal()
+  cameraStore.set({ x: 300 })
+  markDirty(true)
+  const original = IDBObjectStore.prototype.put
+  IDBObjectStore.prototype.put = () => { throw new DOMException('full', 'QuotaExceededError') }
+  try {
+    await assert.rejects(saveLocal(), { name: 'QuotaExceededError' })
+    assert.equal(persistenceStore.getSnapshot().state, 'error')
+    assert.equal(persistenceStore.getSnapshot().viewOnly, false)
+  } finally { IDBObjectStore.prototype.put = original }
 })
 
 test('a corrupt recovery journal is preserved and not silently discarded', async () => {

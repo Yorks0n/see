@@ -132,7 +132,7 @@ export function importTldraw(raw: unknown): CanvasFile | null {
     const height = Math.max(1, (number(props.h, shape.type === 'note' ? 200 + number(props.growY) : Math.max(40, text.split('\n').length * 28)) + (shape.type === 'geo' ? number(props.growY) : 0)) * (['text', 'note'].includes(shape.type) ? scale : 1))
     const box = bounds([{ x: 0, y: 0 }, { x: width, y: 0 }, { x: width, y: height }, { x: 0, y: height }].map((p) => world(shape, p)))
     const base = { id: shape.id, ...box, color: color(props.color) }
-    if (shape.isLocked || number(shape.opacity, 1) !== 1) warnings.add('锁定和透明度仅保留在原始数据中')
+    if (shape.isLocked || number(shape.opacity, 1) !== 1) warnings.add('未导入锁定和透明度')
     if (shape.type === 'arrow') { arrows.push(shape); continue }
     if (shape.type === 'group' || shape.type === 'frame') {
       add(shape, { ...base, type: 'group', label: string(props.name), memberIds: [] })
@@ -146,7 +146,7 @@ export function importTldraw(raw: unknown): CanvasFile | null {
         add(shape, { ...base, type: 'image', url, text: string(props.altText) || undefined,
           naturalWidth: number(asset.w, width), naturalHeight: number(asset.h, height),
           crop: crop.topLeft && crop.bottomRight ? { x: number(start.x), y: number(start.y), width: number(end.x, 1) - number(start.x), height: number(end.y, 1) - number(start.y) } : undefined })
-        if (t.rotation || props.flipX || props.flipY || crop.isCircle) warnings.add('图片旋转、翻转和圆形裁剪仅保留在原始数据中')
+        if (t.rotation || props.flipX || props.flipY || crop.isCircle) warnings.add('未导入图片旋转、翻转和圆形裁剪')
       } else { add(shape, { ...base, type: 'text', text: `[缺失图片] ${string(asset.name)}` }); warnings.add('部分图片缺少资源，已保留占位卡片') }
     } else if (['bookmark', 'embed', 'video'].includes(shape.type)) {
       const asset = object(byId.get(props.assetId)?.props), url = string(shape.type === 'video' ? asset.src : props.url)
@@ -245,5 +245,5 @@ export function importTldraw(raw: unknown): CanvasFile | null {
   }
   const document = records.find((r) => r.typeName === 'document')
   const area = bounds(nodes.flatMap((n) => [{ x: n.x, y: n.y }, { x: n.x + n.width, y: n.y + n.height }]))
-  return { nodes, edges, meta: { name: string(document?.name) || undefined, camera: { x: 80 - area.x, y: 100 - area.y, zoom: 1 }, tldraw: { source: raw, warnings: [...warnings] } } }
+  return { nodes, edges, meta: { name: string(document?.name) || undefined, camera: { x: 80 - area.x, y: 100 - area.y, zoom: 1 }, tldraw: { warnings: [...warnings] } } }
 }

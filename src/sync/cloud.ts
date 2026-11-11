@@ -127,7 +127,6 @@ async function synchronize(active: Session) {
   if (!navigator.onLine) { publish({ state: 'offline', message: '修改已保存在本机，连接恢复后继续同步' }); return }
   const currentSession = await (await api(active, 'session')).json()
   if (currentSession.vaultId !== active.vaultId) throw new Error('服务器数据仓库已变化，请重新登录')
-  publish({ state: 'syncing', message: '' })
   const generation = localGeneration
   const local = await repository!.syncEntries(active.vaultId)
   const listing = await (await api(active, 'boards')).json() as { boards: { id: string; revision: number }[] }
@@ -146,6 +145,7 @@ async function synchronize(active: Session) {
       if (entry && base.revision !== remote.revision) await repository!.acknowledge(active.vaultId, id, remote)
       continue
     }
+    publish({ state: 'syncing', message: '' })
     const merged = remote.revision > 0 && remote.doc === null && localDoc !== null && base.revision === 0
       ? { doc: remote.doc, conflict: true }
       : mergeCanvas(base.doc, localDoc, remote.doc)

@@ -82,7 +82,7 @@ export interface CanvasEdge {
 }
 
 export interface CanvasMeta {
-  tldraw?: { source: unknown; warnings: string[] }
+  tldraw?: { warnings: string[] }
   name?: string
   camera?: { x: number; y: number; zoom: number }
   app?: string
