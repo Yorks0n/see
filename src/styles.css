@@ -71,6 +71,7 @@ button { touch-action: manipulation; }
 .card:hover { border-color: #c8d8e1; }
 .card.selected { box-shadow: 0 5px 16px #39294b18; }
 .block-wrapper.selected::after { content: ''; position: absolute; inset: 0; border-radius: 10px; background: #3199c747; pointer-events: none; z-index: 1; }
+.multi-selection .block-wrapper.selected::after { display: none; }
 .connection-target .card { box-shadow: 0 0 0 3px #609fbb, 0 0 0 8px #609fbb1a; }
 .text-card[data-color='1'] { background: #fce8e9; border-color: #f0d6d9; }
 .text-card[data-color='2'] { background: #fbecdf; border-color: #f0dfce; }
@@ -122,6 +123,7 @@ button { touch-action: manipulation; }
 .stroke-option span { display: block; width: 17px; background: currentColor; border-radius: 4px; }
 .stroke-option:hover, .stroke-option.active { background: #eef5f8; color: #609fbb; }
 .resize-bounds { position: absolute; pointer-events: none; z-index: 5; }
+.multi-resize-bounds { outline: 1px solid var(--accent); }
 .resize-handle { position: absolute; padding: 0; width: 10px; height: 10px; border: 1.5px solid var(--accent); background: white; border-radius: 3px; pointer-events: auto; touch-action: none; box-shadow: 0 1px 2px #39294b12; }
 .nw { top: -5px; left: -5px; cursor: nwse-resize; }
 .ne { top: -5px; right: -5px; cursor: nesw-resize; }

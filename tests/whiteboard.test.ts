@@ -8,6 +8,7 @@ import { cameraAtCenter, minimapBounds, minimapCamera, viewportRect, zoomAtCente
 import { edgeGeometry, hitTest, PRESET_COLORS, strokePath } from '../src/render/renderer'
 import { arrangeNodes, createImageCard, createList, createTextCard, duplicateNodes, expandSelection, finishConnection, listFromSelection, moveConnection, splitImageCaption, startConnection, tools, ToolState, ungroupNodes, updateMembership, type ToolEnv, type PointerInfo } from '../src/tools/tools'
 import { arrangement, ARRANGE_GAP } from '../src/tools/layout'
+import { resizeSelection, selectionBounds } from '../src/tools/resize'
 import { selectionSVG } from '../src/tools/export'
 import { SHORTCUTS } from '../src/shortcuts'
 import { LASER_LIFETIME, LaserTrail } from '../src/tools/laser'
@@ -458,6 +459,97 @@ test('image decoding does not add an undo step or erase redo', () => {
   store.updateNode('photo', { width: 560, height: 280 * 400 / 300 })
   store.undo(); store.redo()
   assert.equal(store.getNode('photo')!.width, 560)
+})
+
+test('multi-selection resize scales geometry, spacing and drawing points around each fixed corner', () => {
+  const nodes: CanvasNode[] = [
+    card('a', -100, -60),
+    { id: 'stroke', type: 'draw', x: 100, y: 40, width: 100, height: 100, points: [{ x: 0, y: 0 }, { x: 100, y: 100 }] },
+  ]
+  const bounds = selectionBounds(nodes)
+  assert.deepEqual(bounds, { x: -100, y: -60, width: 300, height: 200 })
+  for (const corner of ['nw', 'ne', 'se', 'sw']) {
+    const west = corner.includes('w'), north = corner.includes('n')
+    const patches = resizeSelection(nodes, bounds, west ? -300 : 300, north ? -200 : 200, corner, true)
+    const resized = nodes.map((node) => ({ ...node, ...patches.get(node.id) } as CanvasNode))
+    const after = selectionBounds(resized)
+    assert.equal(after.width, 600)
+    assert.equal(after.height, 400)
+    assert.equal(west ? after.x + after.width : after.x, west ? bounds.x + bounds.width : bounds.x)
+    assert.equal(north ? after.y + after.height : after.y, north ? bounds.y + bounds.height : bounds.y)
+    assert.equal(resized[1].x - resized[0].x, 400)
+    assert.equal(resized[1].y - resized[0].y, 200)
+    assert.equal(resized[0].width, 200)
+    assert.deepEqual((resized[1] as any).points, [{ x: 0, y: 0 }, { x: 200, y: 200 }])
+  }
+})
+
+test('multi-selection resize supports independent axes and clamps the whole selection before any block collapses', () => {
+  const nodes: CanvasNode[] = [
+    { id: 'photo', type: 'image', url: 'image.png', x: 0, y: 0, width: 200, height: 100, crop: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 } },
+    { id: 'rect', type: 'rectangle', x: 300, y: 100, width: 100, height: 100 },
+  ]
+  const bounds = selectionBounds(nodes)
+  const patches = resizeSelection(nodes, bounds, 400, 100, 'se', false)
+  assert.deepEqual(patches.get('photo'), { x: 0, y: 0, width: 400, height: 150 })
+  assert.deepEqual(patches.get('rect'), { x: 600, y: 150, width: 200, height: 150 })
+  const clamped = resizeSelection(nodes, bounds, -1000, -1000, 'se', false)
+  assert.equal(clamped.get('photo')!.width, 64)
+  assert.equal(clamped.get('rect')!.width, 32)
+  assert.equal(clamped.get('rect')!.height, 24)
+  assert.deepEqual(nodes[0].crop, { x: 0.1, y: 0.2, width: 0.5, height: 0.5 })
+  const proportional = resizeSelection(nodes, bounds, 200, 0, 'se', true)
+  assert.equal(proportional.get('photo')!.width, 300)
+  assert.equal(proportional.get('photo')!.height, 150)
+})
+
+test('resizing a selection with nested groups transforms each member once and preserves undo, redo and cancellation', () => {
+  documentStore.load({ nodes: [card('a'), card('b', 200), frame(), card('outside', 500, 400), card('unselected', 900, 900)], edges: [{ id: 'ab', fromNode: 'a', toNode: 'b' }] })
+  const ids = expandSelection(new Set(['group', 'a', 'outside']))
+  const nodes = documentStore.getSnapshot().nodes!.filter((node) => ids.has(node.id))
+  const bounds = selectionBounds(nodes), before = documentStore.toJSON()
+  documentStore.beginInteraction()
+  for (const scale of [0.5, 1, 1.5, 2]) documentStore.updateNodes(resizeSelection(nodes, bounds, bounds.width * (scale - 1), bounds.height * (scale - 1), 'se', true))
+  updateMembership(ids)
+  documentStore.endInteraction()
+  assert.equal(documentStore.getNode('a')!.width, 200)
+  assert.equal(documentStore.getNode('a')!.x, 40)
+  assert.deepEqual((documentStore.getNode('group') as GroupNode).memberIds, ['a', 'b'])
+  assert.deepEqual(documentStore.toJSON().nodes!.find((node) => node.id === 'unselected'), before.nodes!.find((node) => node.id === 'unselected'))
+  assert.deepEqual(documentStore.toJSON().edges, before.edges)
+  const after = documentStore.toJSON()
+  documentStore.undo()
+  assert.deepEqual(documentStore.toJSON(), before)
+  assert.equal(documentStore.canUndo, false)
+  documentStore.redo()
+  assert.deepEqual(documentStore.toJSON(), after)
+  documentStore.beginInteraction()
+  documentStore.updateNodes(resizeSelection(nodes, bounds, -100, -50, 'nw', false))
+  documentStore.cancelInteraction()
+  assert.deepEqual(documentStore.toJSON(), after)
+})
+
+test('resizing a selection containing a list retains its minimum height and reflows members without losing membership', () => {
+  documentStore.load({ nodes: [card('a'), card('b', 200)] })
+  const list = documentStore.getNode(listFromSelection(new Set(['a', 'b']))!.id) as GroupNode
+  documentStore.addNode(card('outside', 500, 400))
+  const before = documentStore.toJSON()
+  const ids = expandSelection(new Set([list.id, 'outside']))
+  const nodes = documentStore.getSnapshot().nodes!.filter((node) => ids.has(node.id)), bounds = selectionBounds(nodes)
+  documentStore.beginInteraction()
+  const patches = resizeSelection(nodes, bounds, bounds.width, bounds.height, 'se', true)
+  documentStore.updateNodes(patches)
+  const patch = patches.get(list.id)!
+  documentStore.resizeList(list.id, patch.width!, patch.height!)
+  updateMembership(ids)
+  documentStore.endInteraction()
+  const resized = documentStore.getNode(list.id) as GroupNode
+  assert.equal(resized.width, list.width * 2)
+  assert.equal(resized.minHeight, list.height * 2)
+  assert.deepEqual(resized.memberIds, ['a', 'b'])
+  assert.equal(documentStore.getNode('a')!.width, resized.width - 32)
+  documentStore.undo()
+  assert.deepEqual(documentStore.toJSON(), before)
 })
 
 test('deleting a member cleans up connected edges and group references', () => {

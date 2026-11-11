@@ -23,19 +23,20 @@ export function CardLayer(props: {
   const selectedNodes = (doc.nodes ?? []).filter((n) => selection.has(n.id))
   const active = props.tool === 'select'
   const connected = new Set((doc.edges ?? []).flatMap((e) => [e.fromNode, e.toNode]))
-  return <div className={`card-layer ${active ? '' : 'pass-through'}`}>
+  const multiple = selectedNodes.length > 1
+  return <div className={`card-layer ${active ? '' : 'pass-through'} ${multiple ? 'multi-selection' : ''}`}>
     {(doc.nodes ?? []).map((node) => {
       const selected = selection.has(node.id), editing = props.editingId === node.id
       if (node.type === 'rectangle') return <svg key={node.id} className={`rectangle-block ${selected ? 'selected' : ''}`} data-node-id={node.id} aria-label="矩形" style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
         <g transform={`scale(${camera.zoom})`}>
-          {selected && <rect className="rectangle-selection" width={node.width} height={node.height} strokeWidth={2 + 6 / camera.zoom} />}
+          {selected && !multiple && <rect className="rectangle-selection" width={node.width} height={node.height} strokeWidth={2 + 6 / camera.zoom} />}
           <rect className="rectangle-line" width={node.width} height={node.height} stroke={resolveColor(node.color, '#76717f')} strokeWidth={2} />
           <rect className="rectangle-hit" width={node.width} height={node.height} strokeWidth={2 + 14 / camera.zoom} />
         </g>
       </svg>
       if (node.type === 'draw') return <svg key={node.id} className={`draw-block ${selected ? 'selected' : ''}`} data-node-id={node.id} aria-label="手绘笔迹" style={{ left: node.x * camera.zoom + camera.x, top: node.y * camera.zoom + camera.y, width: node.width * camera.zoom, height: node.height * camera.zoom }}>
         <g transform={`scale(${camera.zoom})`}>
-          {selected && <path className="draw-selection" d={strokePath(node.points)} strokeWidth={(node.strokeWidth ?? 3) + 10 / camera.zoom} />}
+          {selected && !multiple && <path className="draw-selection" d={strokePath(node.points)} strokeWidth={(node.strokeWidth ?? 3) + 10 / camera.zoom} />}
           <path className="draw-line" d={strokePath(node.points)} stroke={resolveColor(node.color, '#44434d')} strokeWidth={node.strokeWidth ?? 3} />
           <path className="draw-hit" d={strokePath(node.points)} strokeWidth={(node.strokeWidth ?? 3) + 14 / camera.zoom} />
         </g>
@@ -51,7 +52,7 @@ export function CardLayer(props: {
       </div>
     })}
     {active && !props.interacting && selectedNodes.length > 0 && (props.editingId === null || (selectedNodes.length === 1 && selectedNodes[0].type === 'image')) && <SelectionBar {...props} nodes={selectedNodes} captionDraft={captionDraft} />}
-    {active && props.editingId === null && !props.cropId && !props.interacting && selectedNodes.length === 1 && <ResizeHandles node={selectedNodes[0]} camera={camera} />}
+    {active && props.editingId === null && !props.cropId && !props.interacting && selectedNodes.length > 0 && <ResizeHandles nodes={selectedNodes} camera={camera} />}
   </div>
 }
 function SelectionBar(props: Parameters<typeof CardLayer>[0] & { nodes: CanvasNode[]; captionDraft: { id: string; text: string } | null }) {
