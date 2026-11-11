@@ -99,12 +99,12 @@ function Minimap({ doc, camera, size }: { doc: CanvasFile; camera: Camera; size:
     {(doc.nodes ?? []).filter((node) => node.type === 'group').map((node) => <rect key={node.id} x={node.x} y={node.y} width={node.width} height={node.height} rx={12} fill={resolveColor(node.color, '#d0dee5')} fillOpacity={0.15} stroke={resolveColor(node.color, '#b9cbd5')} vectorEffect="non-scaling-stroke" />)}
     {(doc.edges ?? []).map((edge) => {
       const geometry = edgeGeometry(edge, byId)
-      return geometry && <path key={edge.id} d={geometry.path} stroke={resolveColor(edge.color, '#609fbb')} fill="none" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+      return geometry && <path key={edge.id} d={geometry.path} stroke={resolveColor(edge.color, '#609fbb')} strokeOpacity={0.55} fill="none" strokeWidth={1} vectorEffect="non-scaling-stroke" />
     })}
     {(doc.nodes ?? []).filter((node) => node.type !== 'group').map((node) => node.type === 'draw'
-      ? <path key={node.id} transform={`translate(${node.x}, ${node.y})`} d={strokePath(node.points)} fill="none" stroke={resolveColor(node.color, '#71697a')} strokeWidth={node.strokeWidth ?? 3} strokeLinecap="round" />
+      ? <path key={node.id} transform={`translate(${node.x}, ${node.y})`} d={strokePath(node.points)} fill="none" stroke={resolveColor(node.color, '#71697a')} strokeOpacity={0.65} strokeWidth={node.strokeWidth ?? 3} strokeLinecap="round" />
       : node.type === 'rectangle' ? <rect key={node.id} x={node.x} y={node.y} width={node.width} height={node.height} fill="none" stroke={resolveColor(node.color, '#76717f')} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
-      : <rect key={node.id} x={node.x} y={node.y} width={node.width} height={node.height} rx={8} fill={resolveColor(node.color, '#b3c4cd')} />)}
-    <rect className="minimap-viewport" x={viewport.x} y={viewport.y} width={viewport.width} height={viewport.height} rx={bounds.width * 0.025} vectorEffect="non-scaling-stroke" />
+      : <rect key={node.id} className={`minimap-card ${node.type === 'image' ? 'minimap-image' : ''}`} style={{ '--node-color': resolveColor(node.color, '#a7b7c2') } as CSSProperties} x={node.x} y={node.y} width={node.width} height={node.height} rx={8} vectorEffect="non-scaling-stroke" />)}
+    <rect className="minimap-viewport" x={viewport.x} y={viewport.y} width={viewport.width} height={viewport.height} rx={bounds.width * 0.0125} vectorEffect="non-scaling-stroke" />
   </svg>
 }

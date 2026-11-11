@@ -165,13 +165,16 @@ button { touch-action: manipulation; }
 .zoom-control input::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 15px; height: 22px; background: white; border: 1px solid #9cafba; border-radius: 8px; margin-top: -8px; box-shadow: 0 1px 3px #30234826; }
 .zoom-control input::-moz-range-track { height: 5px; background: #e2eaf0; border: 1px solid #b8cbd5; border-radius: 8px; }
 .zoom-control input::-moz-range-thumb { width: 13px; height: 20px; background: white; border: 1px solid #9cafba; border-radius: 8px; box-shadow: 0 1px 3px #30234826; }
-.minimap-pop { position: absolute; bottom: 72px; right: 0; padding: 6px; width: 254px; overflow: hidden; pointer-events: auto; background: #f5f9fbf5; }
-.minimap { display: block; width: 240px; height: 152px; border-radius: 7px; background: white; cursor: grab; touch-action: none; }
+.minimap-pop { position: absolute; bottom: 54px; right: 0; padding: 6px; width: 254px; overflow: hidden; pointer-events: auto; background: #fffffff5; border-color: #dfe7ec; box-shadow: 0 6px 24px #354b5e0d, 0 1px 3px #354b5e08; }
+.minimap { display: block; width: 240px; height: 152px; border-radius: 7px; background: #fafcfd; cursor: grab; touch-action: none; }
 .minimap:focus { outline: none; }
 .canvas-controls :focus:not(:focus-visible) { outline: none; }
 .minimap.dragging { cursor: grabbing; }
-.minimap-viewport { fill: #609fbb0b; stroke: #609fbb; stroke-width: 2; pointer-events: none; }
-.minimap-fit { position: absolute; top: 8px; right: 8px; width: 25px; height: 25px; background: #ffffffdf; border-radius: 6px; }
+.minimap-card { fill: color-mix(in srgb, var(--node-color) 22%, white); stroke: color-mix(in srgb, var(--node-color) 42%, white); stroke-width: .75; }
+.minimap-image { fill: #e7eef3; stroke: #bdcdd8; }
+.minimap-viewport { fill: #609fbb0c; stroke: #609fbb; stroke-width: 1.5; pointer-events: none; }
+.minimap-pop > .button-tooltip { position: absolute; top: 10px; right: 10px; }
+.minimap-fit { width: 25px; height: 25px; background: #fffffff0; border: 1px solid #e3eaee; border-radius: 6px; color: #8b9ba7; }
 .minimap-fit svg { width: 16px; height: 16px; }
 .ui-hidden .toolbar, .ui-hidden .draw-settings, .ui-hidden .selection-bar, .ui-hidden .edge-bar, .ui-hidden .resize-bounds, .ui-hidden .block-connect { display: none; }
 .app:has(.board.touch-editing) .primary-tools, .board.touch-editing .canvas-controls, .board.touch-editing .selection-bar { display: none; }
