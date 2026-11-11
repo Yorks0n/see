@@ -1147,6 +1147,8 @@ test('SVG export embeds cropped images, escapes text and includes only selected 
 })
 
 test('shortcut registry has unique entries for list, SVG copy and file and view commands', () => {
+  assert.equal(SHORTCUTS.find((s) => s.id === 'open')!.label, '打开白板')
+  assert.equal(SHORTCUTS.find((s) => s.id === 'open')!.keys, 'Mod + O')
   assert.equal(new Set(SHORTCUTS.map((s) => s.id)).size, SHORTCUTS.length)
   for (const id of ['list', 'copy-svg', 'save', 'open', 'media', 'fit', 'reset-zoom', 'toggle-ui', 'cut']) assert.ok(SHORTCUTS.some((s) => s.id === id))
   assert.equal(SHORTCUTS.find((s) => s.id === 'copy-svg')!.keys, 'Mod + Shift + C')

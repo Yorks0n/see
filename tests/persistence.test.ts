@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
 import { LocalRepository, portableCanvas, RECOVERY_PREFIX, StorageConflictError } from '../src/storage/local'
 import { documentStore } from '../src/store/document'
-import { loadLocal, markDirty, persistenceStore, saveLocal, setActiveFile } from '../src/persistence'
+import { importCanvasFile, loadLocal, markDirty, persistenceStore, saveLocal, serializeCanvasFile, setActiveFile } from '../src/persistence'
 import type { CanvasFile } from '../src/types'
 
 class MemoryStorage {
@@ -47,6 +47,39 @@ const withImage = (): CanvasFile => ({
     { id: 'image', type: 'image', x: 0, y: 10, width: 50, height: 90, url: imageURL, naturalWidth: 100, naturalHeight: 180, crop: { x: 0.2, y: 0.1, width: 0.6, height: 0.8 }, text: '说明' },
     { id: 'group', type: 'group', x: -50, y: -50, width: 400, height: 400, memberIds: ['image'], background: imageURL, backgroundStyle: 'cover' },
   ],
+})
+
+test('downloaded canvas restores every main content state, order, camera and embedded attachment', async () => {
+  const url = URL.createObjectURL(new Blob(['attachment'], { type: 'image/png' }))
+  try {
+    documentStore.load({
+      nodes: [
+        { id: 'text', type: 'text', x: -10, y: 10, width: 220, height: 100, color: '4', text: '# 标题\n\n**粗体**\n\n- 列表\n- [ ] 待办' },
+        { id: 'photo', type: 'image', x: 300, y: 40, width: 160, height: 120, url, text: '图片说明', naturalWidth: 800, naturalHeight: 600, crop: { x: 0.2, y: 0.1, width: 0.5, height: 0.7 } },
+        { id: 'file', type: 'file', x: 50, y: 200, width: 120, height: 60, file: url, subpath: '#section' },
+        { id: 'link', type: 'link', x: 300, y: 200, width: 200, height: 60, url: 'https://example.com' },
+        { id: 'draw', type: 'draw', x: -100, y: 400, width: 60, height: 60, color: '#123456', strokeWidth: 7, points: [{ x: 0, y: 0 }, { x: 60, y: 60 }] },
+        { id: 'rect', type: 'rectangle', x: 0, y: 400, width: 180, height: 80, color: '2' },
+        { id: 'list', type: 'group', x: 600, y: 0, width: 260, height: 400, minHeight: 400, label: '有序列表', layout: 'list', memberIds: ['photo', 'text'] },
+        { id: 'group', type: 'group', x: -200, y: -100, width: 1200, height: 800, label: '分组', memberIds: ['list', 'rect'], color: '5', background: url, backgroundStyle: 'ratio' },
+      ],
+      edges: [{ id: 'edge', fromNode: 'text', toNode: 'photo', fromSide: 'right', toSide: 'left', fromEnd: 'none', toEnd: 'arrow', color: '#abcdef', label: '隐藏的标签', labelIsVisible: false, labelOffset: { x: 12, y: -8 }, lineStyle: 'straight' }],
+      meta: { name: '状态备份', camera: { x: -45, y: 70, zoom: 0.75 }, tldraw: { source: { records: [{ id: 'source' }] }, warnings: ['原始数据'] } },
+    })
+    const before = documentStore.toJSON()
+    const serialized = await serializeCanvasFile(before)
+    URL.revokeObjectURL(url)
+    assert.equal(serialized.includes('blob:'), false)
+    const imported = await importCanvasFile(new File([serialized], 'backup.canvas'))
+    documentStore.load(imported)
+    const after = documentStore.toJSON()
+    const embedded = 'data:image/png;base64,YXR0YWNobWVudA=='
+    const expected = JSON.parse(JSON.stringify(before).replaceAll(url, embedded))
+    expected.meta = { ...expected.meta, app: 'whiteboard', appVersion: '0.1.0' }
+    assert.deepEqual(after, expected)
+    assert.deepEqual(before.nodes!.map((n) => n.id), after.nodes!.map((n) => n.id))
+    assert.equal((before.nodes!.find((n) => n.id === 'photo') as any).url, url)
+  } finally { URL.revokeObjectURL(url) }
 })
 
 async function database(name = 'whiteboard-db', version = 2) {

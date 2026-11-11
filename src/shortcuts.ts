@@ -30,7 +30,7 @@ export const SHORTCUTS = [
   { id: 'open-link', group: '文字编辑', label: '打开文字中的链接', keys: 'Mod + 点击链接' },
   { id: 'cancel', group: '选择', label: '取消操作 / 关闭菜单', keys: 'Esc' },
   { id: 'save', group: '文件', label: '保存到本地', keys: 'Mod + S' },
-  { id: 'open', group: '文件', label: '打开 .canvas', keys: 'Mod + O' },
+  { id: 'open', group: '文件', label: '打开白板', keys: 'Mod + O' },
   { id: 'media', group: '文件', label: '插入媒体文件', keys: 'Mod + Shift + K' },
   { id: 'shortcuts', group: '文件', label: '键盘快捷方式', keys: '?' },
   { id: 'continue-list', group: '文字编辑', label: '继续列表 / 换行', keys: 'Enter' },

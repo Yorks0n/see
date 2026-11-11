@@ -2,6 +2,7 @@ import { documentStore } from './store/document'
 import { cameraStore } from './store/camera'
 import { LocalRepository, portableCanvas, StorageConflictError } from './storage/local'
 import type { CanvasFile } from './types'
+import { importTldraw } from './tools/tldraw'
 
 export const localRepository = new LocalRepository()
 let activeFileId = 'legacy-default'
@@ -85,10 +86,13 @@ export function exportCanvasFile() {
   const doc = documentStore.toJSON()
   return downloadCanvasFile({ ...doc, meta: { ...doc.meta, camera: cameraStore.getSnapshot() } })
 }
-export async function downloadCanvasFile(doc: CanvasFile) {
+export async function serializeCanvasFile(doc: CanvasFile): Promise<string> {
   const portable = await portableCanvas(doc)
   const file = { ...portable, meta: { ...portable.meta, app: 'whiteboard', appVersion: '0.1.0' } }
-  const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
+  return JSON.stringify(file, null, 2)
+}
+export async function downloadCanvasFile(doc: CanvasFile) {
+  const blob = new Blob([await serializeCanvasFile(doc)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -101,6 +105,8 @@ export function importCanvasFile(file: File): Promise<CanvasFile> {
   return file.text().then((text) => {
     const doc: unknown = JSON.parse(text)
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error('无效的画布文件')
+    const tldraw = importTldraw(doc)
+    if (tldraw) return tldraw
     const canvas = doc as CanvasFile
     if (!Array.isArray(canvas.nodes) || (canvas.edges !== undefined && !Array.isArray(canvas.edges))) throw new Error('无效的画布文件')
     return canvas
