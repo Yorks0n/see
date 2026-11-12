@@ -10,7 +10,7 @@ import { arrangeNodes, createImageCard, createList, createTextCard, duplicateNod
 import { arrangement, ARRANGE_GAP } from '../src/tools/layout'
 import { resizeSelection, selectionBounds } from '../src/tools/resize'
 import { selectionSVG } from '../src/tools/export'
-import { SHORTCUTS } from '../src/shortcuts'
+import { SHORTCUTS, shortcut } from '../src/shortcuts'
 import { LASER_LIFETIME, LaserTrail } from '../src/tools/laser'
 import { TouchNavigation } from '../src/tools/touchNavigation'
 import { editingCamera } from '../src/render/editing'
@@ -1621,12 +1621,40 @@ test('SVG export embeds cropped images, escapes text and includes only selected 
   await assert.rejects(selectionSVG({ nodes: [] }), /没有可导出/)
 })
 
-test('shortcut registry has unique entries for list, SVG copy and file and view commands', () => {
+test('PNG copy and export fit a single image card without padding and preserve crops and captions', async () => {
+  const photo: ImageNode = { id: 'photo', type: 'image', x: -120, y: 80, width: 100, height: 60, url: 'data:image/png;base64,AA' }
+  const doc = { nodes: [photo, card('outside', 600, 600)] }
+  documentStore.load(doc)
+  for (const ids of [new Set(['photo']), new Set<string>(), undefined]) {
+    const single = ids?.size ? doc : { nodes: [photo] }
+    const svg = await selectionSVG(single, ids, 'png')
+    assert.match(svg, /^<svg [^>]*width="100" height="60" viewBox="-120 80 100 60">/)
+    assert.doesNotMatch(svg, /outside/)
+  }
+  const cropped = { ...photo, crop: { x: 0.25, y: 0.1, width: 0.5, height: 0.5 }, text: 'A & B' }
+  const svg = await selectionSVG({ nodes: [cropped] }, undefined, 'png')
+  assert.match(svg, /^<svg [^>]*width="100" height="60" viewBox="-120 80 100 60">/)
+  assert.match(svg, /x="-50" y="-12" width="200" height="120"/)
+  assert.match(svg, /A &amp; B/)
+})
+
+test('SVG and PNG exports retain padding for other selections', async () => {
+  const photo: ImageNode = { id: 'photo', type: 'image', x: 20, y: 20, width: 100, height: 60, url: 'data:image/png;base64,AA' }
+  assert.match(await selectionSVG({ nodes: [photo] }), /^<svg [^>]*width="148" height="124" viewBox="-4 -20 148 124">/)
+  assert.match(await selectionSVG({ nodes: [card('text')] }, undefined, 'png'), /^<svg [^>]*width="148" height="124" viewBox="-4 -20 148 124">/)
+  assert.match(await selectionSVG({ nodes: [photo, { ...photo, id: 'other', x: 200 }] }, undefined, 'png'), /^<svg [^>]*width="328" height="124" viewBox="-4 -20 328 124">/)
+})
+
+test('shortcut registry has unique entries for list, PNG copy and file and view commands', () => {
   assert.equal(SHORTCUTS.find((s) => s.id === 'open')!.label, '打开白板')
   assert.equal(SHORTCUTS.find((s) => s.id === 'open')!.keys, 'Mod + O')
   assert.equal(new Set(SHORTCUTS.map((s) => s.id)).size, SHORTCUTS.length)
-  for (const id of ['list', 'copy-svg', 'save', 'open', 'media', 'fit', 'reset-zoom', 'toggle-ui', 'cut']) assert.ok(SHORTCUTS.some((s) => s.id === id))
-  assert.equal(SHORTCUTS.find((s) => s.id === 'copy-svg')!.keys, 'Mod + Shift + C')
+  for (const id of ['list', 'copy-png', 'save', 'open', 'media', 'fit', 'reset-zoom', 'toggle-ui', 'cut']) assert.ok(SHORTCUTS.some((s) => s.id === id))
+  assert.equal(SHORTCUTS.find((s) => s.id === 'copy-png')!.label, '复制为 PNG')
+  assert.equal(SHORTCUTS.find((s) => s.id === 'copy-png')!.keys, 'Mod + Shift + C')
+  assert.deepEqual(SHORTCUTS.filter((s) => s.keys === 'Mod + Shift + C').map((s) => s.id), ['copy-png'])
+  assert.ok(shortcut('copy-png'))
+  assert.equal(shortcut('copy-svg'), '')
 })
 
 test('pending saves retain the source file and snapshot when another file becomes active', async () => {

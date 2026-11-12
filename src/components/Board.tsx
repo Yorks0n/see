@@ -330,7 +330,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
         return
       }
       const mod = e.metaKey || e.ctrlKey, key = e.key.toLowerCase()
-      if (mod && e.shiftKey && key === 'c') { e.preventDefault(); runBoardCommand('copy-svg'); return }
+      if (mod && e.shiftKey && key === 'c') { e.preventDefault(); runBoardCommand('copy-png'); return }
       if (mod && key === '\\') { e.preventDefault(); props.onToggleUI(); return }
       if (!mod && e.shiftKey && e.code === 'Digit1') { e.preventDefault(); runBoardCommand('fit'); return }
       if (!mod && e.shiftKey && e.code === 'Digit0') { e.preventDefault(); runBoardCommand('reset-zoom'); return }
@@ -472,7 +472,7 @@ export function Board(props: { tool: ToolId; setTool: (t: ToolId) => void; newNo
       }).catch(fail)
     }
     if (['copy-svg', 'copy-png', 'export-svg', 'export-png'].includes(command)) {
-      const svg = selectionSVG(documentStore.getSnapshot(), selection)
+      const svg = selectionSVG(documentStore.getSnapshot(), selection, command.endsWith('-png') ? 'png' : 'svg')
       if (command === 'copy-svg') void navigator.clipboard.write([new ClipboardItem({ 'text/plain': svg.then((value) => new Blob([value], { type: 'text/plain' })) })]).catch(fail)
       else if (command === 'copy-png') void navigator.clipboard.write([new ClipboardItem({ 'image/png': svg.then(svgPNG) })]).catch(fail)
       else void svg.then(async (value) => {

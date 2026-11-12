@@ -28,12 +28,14 @@ function textSVG(text: string, x: number, y: number, width: number, size = 14) {
   }
   return `<text font-family="system-ui,sans-serif" font-size="${size}" fill="#45414f">${lines.map((line, index) => `<tspan x="${x}" y="${y + index * size * 1.6}">${escape(line)}</tspan>`).join('')}</text>`
 }
-export async function selectionSVG(doc: CanvasFile, ids?: Set<string>) {
+export async function selectionSVG(doc: CanvasFile, ids?: Set<string>, format: 'svg' | 'png' = 'svg') {
   const expanded = ids?.size ? expandSelection(ids) : null
   const nodes = (doc.nodes ?? []).filter((n) => !expanded || expanded.has(n.id))
   if (!nodes.length) throw new Error('画布中没有可导出的内容')
-  const x = Math.min(...nodes.map((n) => n.x)) - 24, y = Math.min(...nodes.map((n) => n.y)) - 40
-  const width = Math.max(...nodes.map((n) => n.x + n.width)) - x + 24, height = Math.max(...nodes.map((n) => n.y + n.height)) - y + 24
+  const singleImage = format === 'png' && nodes.length === 1 && nodes[0].type === 'image'
+  const padding = singleImage ? 0 : 24, topPadding = singleImage ? 0 : 40
+  const x = Math.min(...nodes.map((n) => n.x)) - padding, y = Math.min(...nodes.map((n) => n.y)) - topPadding
+  const width = Math.max(...nodes.map((n) => n.x + n.width)) - x + padding, height = Math.max(...nodes.map((n) => n.y + n.height)) - y + padding
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const groups = nodes.filter((n) => n.type === 'group').map((n) => `<rect x="${n.x}" y="${n.y}" width="${n.width}" height="${n.height}" rx="10" fill="${escape(resolveColor(n.color, '#9b95ab'))}" fill-opacity=".07" stroke="${escape(resolveColor(n.color, '#9b95ab'))}" />${textSVG(n.type === 'group' ? n.label ?? '' : '', n.x + 8, n.y + (n.layout === 'list' ? 26 : -10), n.width - 16)}`).join('')
   const edges = (doc.edges ?? []).flatMap((edge) => {
