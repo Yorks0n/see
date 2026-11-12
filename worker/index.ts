@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
-import { applyCanvasChanges, assetRefs, PART_SIZE, validAssetMime, validateCanvas } from '../src/sync/protocol'
+import { applyCanvasChanges, ASSET_RETENTION_MS, assetRefs, PART_SIZE, validAssetMime, validateCanvas } from '../src/sync/protocol'
 
 interface Env {
   VAULT: DurableObjectNamespace<SeeVault>
@@ -11,6 +11,7 @@ interface Env {
 }
 type BoardRow = { id: string; revision: number; doc: string; updated: number }
 type UploadRow = { id: string; hash: string; mime: string; size: number; created: number }
+const UPLOAD_RETENTION_MS = 24 * 60 * 60 * 1000
 const encoder = new TextEncoder()
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('')
 const hash = async (text: string) => hex(await crypto.subtle.digest('SHA-256', encoder.encode(text)))
@@ -57,8 +58,54 @@ export class SeeVault extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, mime TEXT NOT NULL, size INTEGER NOT NULL, created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS parts (upload TEXT NOT NULL, part INTEGER NOT NULL, etag TEXT NOT NULL, PRIMARY KEY(upload, part));
       CREATE TABLE IF NOT EXISTS assets (hash TEXT PRIMARY KEY, mime TEXT NOT NULL, size INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS asset_gc (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL, deleting INTEGER NOT NULL DEFAULT 0);
     `)
     this.sql.exec('INSERT OR IGNORE INTO settings VALUES (?, ?)', 'vaultId', crypto.randomUUID())
+    // Existing installations start a grace period for previously untracked orphans.
+    this.retainAssets()
+    ctx.blockConcurrencyWhile(() => this.scheduleAlarm())
+  }
+
+  private retainAssets(now = Date.now()) {
+    const referenced = new Set<string>()
+    for (const row of this.sql.exec<{ doc: string }>('SELECT doc FROM boards')) {
+      for (const ref of assetRefs(JSON.parse(row.doc))) referenced.add(ref)
+    }
+    for (const { hash } of this.sql.exec<{ hash: string }>('SELECT hash FROM assets')) {
+      if (referenced.has(hash)) this.sql.exec('DELETE FROM asset_gc WHERE hash = ? AND deleting = 0', hash)
+      else this.sql.exec('INSERT OR IGNORE INTO asset_gc (hash, expires) VALUES (?, ?)', hash, now + ASSET_RETENTION_MS)
+    }
+  }
+  private async scheduleAlarm() {
+    const current = await this.ctx.storage.getAlarm()
+    const upload = this.sql.exec<{ next: number | null }>('SELECT MIN(created) AS next FROM uploads').one().next
+    const asset = this.sql.exec<{ next: number | null }>('SELECT MIN(expires) AS next FROM asset_gc WHERE deleting = 0').one().next
+    const retry = this.sql.exec('SELECT hash FROM asset_gc WHERE deleting = 1 LIMIT 1').toArray().length > 0
+    const next = Math.min(upload === null ? Infinity : upload + UPLOAD_RETENTION_MS, asset ?? Infinity, retry ? Date.now() + 60000 : Infinity)
+    if (Number.isFinite(next) && (current === null || next < current)) await this.ctx.storage.setAlarm(Math.max(Date.now() + 1, next))
+  }
+  private async collectAssets(now = Date.now()) {
+    const expired = this.ctx.storage.transactionSync(() => {
+      this.retainAssets(now)
+      const rows = this.sql.exec<{ hash: string }>('SELECT hash FROM asset_gc WHERE expires <= ? OR deleting = 1', now).toArray()
+      const refs = new Set(rows.map((row) => row.hash))
+      // Claim before R2 I/O. Requests may interleave during delete(), so claimed
+      // attachments cannot be reused or committed until removal has finished.
+      for (const { hash } of rows) this.sql.exec('UPDATE asset_gc SET deleting = 1 WHERE hash = ?', hash)
+      if (refs.size) for (const row of this.sql.exec<{ id: string; revision: number; doc: string }>('SELECT id, revision, doc FROM history').toArray()) {
+        if (assetRefs(JSON.parse(row.doc)).some((ref) => refs.has(ref))) this.sql.exec('DELETE FROM history WHERE id = ? AND revision = ?', row.id, row.revision)
+      }
+      return rows
+    })
+    for (const { hash } of expired) {
+      await this.env.MEDIA.delete(hash)
+      this.ctx.storage.transactionSync(() => {
+        for (const row of this.sql.exec<{ id: string }>('SELECT id FROM uploads WHERE hash = ?', hash).toArray()) this.sql.exec('DELETE FROM parts WHERE upload = ?', row.id)
+        this.sql.exec('DELETE FROM uploads WHERE hash = ?', hash)
+        this.sql.exec('DELETE FROM assets WHERE hash = ?', hash)
+        this.sql.exec('DELETE FROM asset_gc WHERE hash = ?', hash)
+      })
+    }
   }
 
   private get vaultId() { return this.sql.exec<{ value: string }>('SELECT value FROM settings WHERE key = ?', 'vaultId').one().value }
@@ -136,7 +183,7 @@ export class SeeVault extends DurableObject<Env> {
       }
       if (!validateCanvas(input.doc)) throw new HttpError(400, '无效的白板数据')
       for (const ref of assetRefs(input.doc)) {
-        if (!this.sql.exec('SELECT hash FROM assets WHERE hash = ?', ref).toArray().length) throw new HttpError(409, '附件尚未上传完成')
+        if (!this.sql.exec('SELECT hash FROM assets WHERE hash = ? AND NOT EXISTS (SELECT 1 FROM asset_gc WHERE hash = ? AND deleting = 1)', ref, ref).toArray().length) return json({ error: '附件尚未上传完成，请重试', missingAssets: [ref] }, 409)
       }
       if (current.revision && current.doc === null && input.doc !== null) return json({ error: '白板已删除，请另存副本', current }, 409)
       if (JSON.stringify(current.doc) === JSON.stringify(input.doc)) return json(current)
@@ -144,16 +191,25 @@ export class SeeVault extends DurableObject<Env> {
       this.sql.exec('INSERT INTO boards VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, doc = excluded.doc, updated = excluded.updated', id, revision, serialized, updated)
       this.sql.exec('INSERT INTO history VALUES (?, ?, ?, ?)', id, revision, serialized, updated)
       this.sql.exec('DELETE FROM history WHERE id = ? AND revision <= ?', id, revision - 50)
+      this.retainAssets(updated)
       changedRevision = revision
       return json({ id, revision, ...(request.method === 'PATCH' ? {} : { doc: input.doc }) })
     })
-    if (changedRevision !== undefined) await this.broadcast(id, changedRevision)
+    if (changedRevision !== undefined) {
+      await this.scheduleAlarm()
+      await this.broadcast(id, changedRevision)
+    }
     return response
   }
   private async startUpload(request: Request) {
     const input = await body(request, 4096)
     if (!/^[a-f0-9]{64}$/.test(input.hash) || !validAssetMime(input.mime) || !Number.isSafeInteger(input.size) || input.size < 1 || input.size > 512 * 1024 * 1024) throw new HttpError(400, '无效的附件（最大 512 MB）')
-    if (this.sql.exec('SELECT hash FROM assets WHERE hash = ?', input.hash).toArray().length) return json({ complete: true })
+    if (this.sql.exec('SELECT hash FROM asset_gc WHERE hash = ? AND deleting = 1', input.hash).toArray().length) throw new HttpError(409, '附件正在清理，请稍后重试')
+    if (this.sql.exec('SELECT hash FROM assets WHERE hash = ?', input.hash).toArray().length) {
+      this.sql.exec('UPDATE asset_gc SET expires = ? WHERE hash = ?', Date.now() + ASSET_RETENTION_MS, input.hash)
+      await this.scheduleAlarm()
+      return json({ complete: true })
+    }
     let row = this.sql.exec<UploadRow>('SELECT * FROM uploads WHERE hash = ?', input.hash).toArray()[0]
     if (!row) {
       const upload = await this.env.MEDIA.createMultipartUpload(input.hash, { httpMetadata: { contentType: input.mime } })
@@ -163,7 +219,7 @@ export class SeeVault extends DurableObject<Env> {
       else {
         row = { id: upload.uploadId, hash: input.hash, mime: input.mime, size: input.size, created: Date.now() }
         this.sql.exec('INSERT INTO uploads VALUES (?, ?, ?, ?, ?)', row.id, row.hash, row.mime, row.size, row.created)
-        await this.ctx.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1000)
+        await this.scheduleAlarm()
       }
     }
     if (row.size !== input.size || row.mime !== input.mime) throw new HttpError(409, '附件信息不一致')
@@ -184,6 +240,7 @@ export class SeeVault extends DurableObject<Env> {
   private async finishUpload(uploadId: string) {
     const row = this.sql.exec<UploadRow>('SELECT * FROM uploads WHERE id = ?', uploadId).toArray()[0]
     if (!row) throw new HttpError(404, '上传记录已过期，请重试')
+    if (this.sql.exec('SELECT hash FROM asset_gc WHERE hash = ? AND deleting = 1', row.hash).toArray().length) throw new HttpError(409, '附件正在清理，请稍后重试')
     if (this.sql.exec('SELECT hash FROM assets WHERE hash = ?', row.hash).toArray().length) return json({ complete: true })
     const parts = this.sql.exec<{ part: number; etag: string }>('SELECT part, etag FROM parts WHERE upload = ? ORDER BY part', row.id).toArray()
     if (parts.length !== Math.ceil(row.size / PART_SIZE)) throw new HttpError(409, '附件尚未上传完整')
@@ -202,10 +259,12 @@ export class SeeVault extends DurableObject<Env> {
       throw new HttpError(400, '附件内容校验失败，请重新上传')
     }
     this.sql.exec('INSERT OR IGNORE INTO assets VALUES (?, ?, ?)', row.hash, row.mime, row.size)
+    this.sql.exec('INSERT OR IGNORE INTO asset_gc (hash, expires) VALUES (?, ?)', row.hash, Date.now() + ASSET_RETENTION_MS)
+    await this.scheduleAlarm()
     return json({ complete: true })
   }
   private async getAsset(request: Request, ref: string) {
-    if (!/^[a-f0-9]{64}$/.test(ref) || !this.sql.exec('SELECT hash FROM assets WHERE hash = ?', ref).toArray().length) throw new HttpError(404, '附件不存在')
+    if (!/^[a-f0-9]{64}$/.test(ref) || !this.sql.exec('SELECT hash FROM assets WHERE hash = ? AND NOT EXISTS (SELECT 1 FROM asset_gc WHERE hash = ? AND deleting = 1)', ref, ref).toArray().length) throw new HttpError(404, '附件不存在')
     const object = await this.env.MEDIA.get(ref, { range: request.headers })
     if (!object) throw new HttpError(404, '附件不存在')
     const headers = new Headers({ 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes' })
@@ -266,13 +325,17 @@ export class SeeVault extends DurableObject<Env> {
     }
   }
   async alarm() {
-    for (const row of this.sql.exec<UploadRow>('SELECT * FROM uploads WHERE created < ?', Date.now() - 24 * 60 * 60 * 1000).toArray()) {
-      try { await this.env.MEDIA.resumeMultipartUpload(row.hash, row.id).abort() } catch { /* Already completed. */ }
-      this.sql.exec('DELETE FROM parts WHERE upload = ?', row.id)
-      this.sql.exec('DELETE FROM uploads WHERE id = ?', row.id)
+    try {
+      for (const row of this.sql.exec<UploadRow>('SELECT * FROM uploads WHERE created <= ?', Date.now() - UPLOAD_RETENTION_MS).toArray()) {
+        try { await this.env.MEDIA.resumeMultipartUpload(row.hash, row.id).abort() } catch { /* Already completed. */ }
+        this.sql.exec('DELETE FROM parts WHERE upload = ?', row.id)
+        this.sql.exec('DELETE FROM uploads WHERE id = ?', row.id)
+      }
+      this.sql.exec('DELETE FROM sessions WHERE expires < ?', Date.now())
+      await this.collectAssets()
+    } finally {
+      await this.scheduleAlarm()
     }
-    this.sql.exec('DELETE FROM sessions WHERE expires < ?', Date.now())
-    if (this.sql.exec('SELECT id FROM uploads LIMIT 1').toArray().length) await this.ctx.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1000)
   }
 }
 

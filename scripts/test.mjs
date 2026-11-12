@@ -27,7 +27,7 @@ try {
       rollupOptions: { external: ['node:test', 'node:assert/strict'] },
     },
   })
-  const result = spawnSync(process.execPath, ['--test', ...['whiteboard', 'persistence', 'tldraw', 'sync', 'cloud-client', 'local-sync'].map((name) => join(outDir, `${name}.test.mjs`))], { stdio: 'inherit' })
+  const result = spawnSync(process.execPath, ['--test', ...['whiteboard', 'persistence', 'tldraw', 'sync', 'cloud-client', 'local-sync'].map((name) => join(outDir, `${name}.test.mjs`)), new URL('../tests/cloud-gc.test.mjs', import.meta.url).pathname], { stdio: 'inherit' })
   process.exitCode = result.status ?? 1
 } finally {
   await rm(outDir, { recursive: true, force: true })

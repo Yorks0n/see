@@ -4,6 +4,7 @@ export interface CloudBoard { id: string; revision: number; doc: CanvasFile | nu
 export interface SyncBase { revision: number; doc: CanvasFile | null }
 export const ASSET_PREFIX = 'see-asset:'
 export const PART_SIZE = 8 * 1024 * 1024
+export const ASSET_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 interface RecordChanges<T> { upsert: T[]; remove: string[]; order?: string[] }
 export interface CanvasChanges {

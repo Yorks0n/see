@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { IDBFactory } from 'fake-indexeddb'
 import { LocalRepository } from '../src/storage/local'
 import type { CanvasFile } from '../src/types'
-import { applyCanvasChanges } from '../src/sync/protocol'
+import { applyCanvasChanges, ASSET_RETENTION_MS, assetRefs } from '../src/sync/protocol'
 
 test('client persists offline edits, merges after reconnect, retries races and preserves conflicting versions', async () => {
   const values = new Map<string, string>()
@@ -118,7 +118,7 @@ test('client persists offline edits, merges after reconnect, retries races and p
   } finally { stop(); globalThis.fetch = originalFetch }
 })
 
-test('image-heavy sync uploads concurrently, resumes failures and sends only changed records afterwards', async () => {
+test('image-heavy sync uploads concurrently, resumes failures and sends only changed records afterwards', async (t) => {
   Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() })
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } })
   const originalFetch = globalThis.fetch
@@ -170,6 +170,8 @@ test('image-heavy sync uploads concurrently, resumes failures and sends only cha
     }
     if (body.baseRevision !== current.revision) return Response.json({ error: 'conflict', current }, { status: 409 })
     const doc = init?.method === 'PATCH' ? applyCanvasChanges(current.doc!, body.changes) : body.doc
+    const missingAssets = assetRefs(doc).filter((ref) => !uploads.get(ref)?.complete)
+    if (missingAssets.length) return Response.json({ error: 'attachment collected', missingAssets }, { status: 409 })
     const result = { id, revision: current.revision + 1, doc }
     remote.set(id, result)
     return Response.json(init?.method === 'PATCH' ? { id, revision: result.revision } : result)
@@ -202,6 +204,33 @@ test('image-heavy sync uploads concurrently, resumes failures and sends only cha
     await cloud.syncNow()
     assert.equal(remote.get('media-board')!.doc!.meta!.name, 'renamed remotely')
     assert.equal(remote.get('media-board')!.doc!.nodes![1].y, 20)
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+
+    const restore = (await repo.load('media-board'))!
+    const deletedHash = assetRefs(remote.get('media-board')!.doc)[0]
+    const removeRemoteImage = () => {
+      const current = remote.get('media-board')!
+      remote.set('media-board', { ...current, revision: current.revision + 1, doc: { ...current.doc!, nodes: current.doc!.nodes!.filter((node) => node.id !== 'image-0') } })
+      uploads.delete(deletedHash)
+    }
+    removeRemoteImage()
+    await cloud.syncNow()
+    await repo.load('media-board')
+    await repo.save('media-board', restore)
+    await cloud.syncNow()
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'offline', 'missing cloud attachments invalidate cached upload receipts')
+    await cloud.syncNow()
+    assert.equal(startRequests, 8)
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+
+    removeRemoteImage()
+    await cloud.syncNow()
+    await repo.load('media-board')
+    const later = Date.now() + ASSET_RETENTION_MS
+    t.mock.method(Date, 'now', () => later)
+    await repo.save('media-board', restore)
+    await cloud.syncNow()
+    assert.equal(startRequests, 9, 'seven-day-old receipts must be rechecked before restoring an image')
     assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
   } finally { stop(); globalThis.fetch = originalFetch }
 })

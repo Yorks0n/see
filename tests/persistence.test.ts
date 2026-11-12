@@ -7,6 +7,8 @@ import { cameraStore } from '../src/store/camera'
 import { saveStatusIndicator } from '../src/components/SaveStatus'
 import { importCanvasFile, loadLocal, markDirty, persistenceStore, saveLocal, serializeCanvasFile, setActiveFile } from '../src/persistence'
 import type { CanvasFile } from '../src/types'
+import { ASSET_RETENTION_MS, assetRefs } from '../src/sync/protocol'
+import { startAssetGarbageCollection } from '../src/storage/garbageCollection'
 
 class MemoryStorage {
   private values = new Map<string, string>()
@@ -455,4 +457,188 @@ test('sync acknowledgements never move the common base backwards across tabs', a
   await repo.acknowledge('vault', 'board', { revision: 2, doc: canvas('older') })
   assert.equal((await repo.syncEntries('vault'))[0].base!.revision, 10)
   assert.equal((await repo.syncEntries('different-vault'))[0].base, undefined)
+})
+
+test('attachments expire exactly seven days after the last image, background or board reference is removed', async (t) => {
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const repo = new LocalRepository()
+  await repo.save('board', withImage())
+  const ref = assetRefs((await inspect('kv', 'canvas:board')).doc)[0]
+  const backgroundOnly = withImage()
+  backgroundOnly.nodes = backgroundOnly.nodes!.filter((node) => node.type !== 'image')
+  await repo.save('board', backgroundOnly)
+  now += ASSET_RETENTION_MS + 1
+  assert.equal(await repo.collectGarbage(), null)
+  assert.ok(await repo.getAsset(ref), 'group backgrounds still reference the original attachment')
+  await repo.delete('board')
+  const deadline = now + ASSET_RETENTION_MS
+  assert.equal(await repo.collectGarbage(deadline - 1), deadline)
+  assert.ok(await repo.getAsset(ref))
+  assert.equal(await new LocalRepository().collectGarbage(deadline), null)
+  assert.equal(await repo.getAsset(ref), undefined)
+})
+
+test('shared attachments survive duplicates and conflict copies, while sync bases do not extend retention', async (t) => {
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const repo = new LocalRepository()
+  await repo.save('board', withImage())
+  const saved = (await inspect('kv', 'canvas:board')).doc as CanvasFile
+  const ref = assetRefs(saved)[0]
+  await repo.acknowledge('vault', 'board', { revision: 1, doc: saved })
+  await repo.acceptRemote('vault', 'board', 1, { revision: 2, doc: null }, 'conflict-copy')
+  now += ASSET_RETENTION_MS
+  await repo.collectGarbage()
+  assert.ok(await repo.getAsset(ref))
+  await repo.load('conflict-copy')
+  await repo.delete('conflict-copy')
+  now += ASSET_RETENTION_MS
+  await repo.collectGarbage()
+  assert.equal(await repo.getAsset(ref), undefined)
+  assert.equal((await repo.syncEntries('vault')).find((entry) => entry.id === 'board')!.base!.revision, 2)
+})
+
+test('restoring a reference cancels deletion and a second removal starts a fresh seven days', async (t) => {
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const repo = new LocalRepository()
+  await repo.save('board', withImage())
+  const saved = (await inspect('kv', 'canvas:board')).doc as CanvasFile
+  const ref = assetRefs(saved)[0]
+  await repo.acknowledge('vault', 'board', { revision: 1, doc: saved })
+  await repo.save('board', canvas())
+  now += ASSET_RETENTION_MS - 1
+  await repo.save('board', saved)
+  now++
+  await repo.collectGarbage()
+  assert.ok(await repo.getAsset(ref))
+  await repo.save('board', canvas())
+  now += ASSET_RETENTION_MS - 1
+  await repo.collectGarbage()
+  assert.ok(await repo.getAsset(ref), 'old sync snapshots must not shorten or extend the new grace period')
+  now++
+  await repo.collectGarbage()
+  assert.equal(await repo.getAsset(ref), undefined)
+})
+
+test('an orphaned download or pre-existing attachment receives one persisted grace period', async (t) => {
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const repo = new LocalRepository()
+  await repo.save('board', withImage())
+  const ref = assetRefs((await inspect('kv', 'canvas:board')).doc)[0]
+  const blob = (await repo.getAsset(ref))!
+  // Simulate an older database with an orphan but no retention metadata.
+  const db = await database()
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction('kv', 'readwrite')
+    tx.objectStore('kv').delete('canvas:board')
+    tx.oncomplete = () => resolve()
+    tx.onabort = () => reject(tx.error)
+  })
+  db.close()
+  const deadline = now + ASSET_RETENTION_MS
+  assert.equal(await repo.collectGarbage(), deadline)
+  now += ASSET_RETENTION_MS - 1
+  assert.equal(await new LocalRepository().collectGarbage(), deadline)
+  now++
+  await repo.collectGarbage()
+  assert.equal(await repo.getAsset(ref), undefined)
+  await repo.cacheAsset(ref, blob)
+  assert.equal(await repo.collectGarbage(), now + ASSET_RETENTION_MS)
+  now += ASSET_RETENTION_MS
+  await repo.collectGarbage()
+  assert.equal(await repo.getAsset(ref), undefined)
+})
+
+test('garbage collection rolls back attachment and deadline deletion together on failure', async (t) => {
+  const now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const repo = new LocalRepository()
+  await repo.save('board', withImage())
+  const ref = assetRefs((await inspect('kv', 'canvas:board')).doc)[0]
+  await repo.delete('board')
+  const original = IDBObjectStore.prototype.delete
+  IDBObjectStore.prototype.delete = function (key) {
+    if (this.name === 'assets') throw new Error('disk error')
+    return original.call(this, key)
+  }
+  try { await assert.rejects(repo.collectGarbage(now + ASSET_RETENTION_MS), /disk error/) }
+  finally { IDBObjectStore.prototype.delete = original }
+  assert.ok(await repo.getAsset(ref))
+  assert.equal(await inspect('kv', `asset-gc:see-asset:${ref}`), now + ASSET_RETENTION_MS)
+  await repo.collectGarbage(now + ASSET_RETENTION_MS)
+  assert.equal(await repo.getAsset(ref), undefined)
+})
+
+test('an open tab can save an undo image again after another tab has reclaimed its stored attachment', async () => {
+  const repo = new LocalRepository()
+  await repo.save('board', withImage())
+  const undo = (await repo.load('board'))!
+  const ref = assetRefs((await inspect('kv', 'canvas:board')).doc)[0]
+  await repo.save('board', canvas())
+  await new LocalRepository().collectGarbage(Date.now() + ASSET_RETENTION_MS)
+  assert.equal(await repo.getAsset(ref), undefined)
+  await repo.save('board', undo)
+  assert.ok(await repo.getAsset(ref))
+  assert.deepEqual(await portableCanvas((await new LocalRepository().load('board'))!), withImage())
+})
+
+test('expired recovery journals cannot resurrect deleted attachments or block startup', async (t) => {
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const repo = new LocalRepository()
+  await repo.save('board', withImage())
+  const loaded = (await repo.load('board'))!
+  await repo.delete('board')
+  repo.journal('board', loaded)
+  repo.journal('text-only', canvas('unsaved text'))
+  now += ASSET_RETENTION_MS
+  await repo.collectGarbage()
+  await new LocalRepository().recover(localStorage)
+  assert.equal(localStorage.length, 0)
+  assert.deepEqual(await repo.list(), [{ id: 'text-only', name: 'unsaved text' }])
+  assert.equal((await inspect('assets')).length, 0)
+})
+
+test('local garbage collection schedules the deadline and catches up after the page reopens', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() })
+  for (const key of ['window', 'document']) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, key)
+    Object.defineProperty(globalThis, key, { configurable: true, value: new EventTarget() })
+    t.after(() => {
+      if (previous) Object.defineProperty(globalThis, key, previous)
+      else delete (globalThis as any)[key]
+    })
+  }
+  const repo = new LocalRepository()
+  await repo.save('board', withImage())
+  const ref = assetRefs((await inspect('kv', 'canvas:board')).doc)[0]
+  const blob = (await repo.getAsset(ref))!
+  const collect = repo.collectGarbage.bind(repo)
+  let pending = Promise.resolve<number | null>(null)
+  t.mock.method(repo, 'collectGarbage', () => { pending = collect(); return pending })
+  const onError = (error: unknown) => { throw error }
+  let stop = startAssetGarbageCollection(repo, onError)
+  try {
+    await pending
+    await repo.save('board', canvas())
+    await pending
+    t.mock.timers.tick(ASSET_RETENTION_MS - 1)
+    assert.ok(await repo.getAsset(ref))
+    window.dispatchEvent(new Event('focus'))
+    await pending
+    t.mock.timers.tick(1)
+    await pending
+    assert.equal(await repo.getAsset(ref), undefined)
+    await repo.cacheAsset(ref, blob)
+    await pending
+    stop()
+    t.mock.timers.tick(ASSET_RETENTION_MS)
+    assert.ok(await repo.getAsset(ref), 'a closed page cannot run browser storage cleanup')
+    stop = startAssetGarbageCollection(repo, onError)
+    await pending
+    assert.equal(await repo.getAsset(ref), undefined)
+  } finally { stop() }
 })

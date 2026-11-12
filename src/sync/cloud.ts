@@ -1,4 +1,4 @@
-import { assetRefs, canvasChanges, cloudCanvas, equal, mergeCanvas, PART_SIZE, type CloudBoard } from './protocol'
+import { ASSET_RETENTION_MS, assetRefs, canvasChanges, cloudCanvas, equal, mergeCanvas, PART_SIZE, type CloudBoard } from './protocol'
 import { LocalRepository, StorageConflictError } from '../storage/local'
 import type { CanvasFile } from '../types'
 import { startCloudPush } from './push'
@@ -6,7 +6,7 @@ import { startCloudPush } from './push'
 const SETTINGS_KEY = 'see-cloud-session'
 interface Session { endpoint: string; token: string; vaultId: string; username: string }
 interface State { enabled: boolean; state: 'local' | 'syncing' | 'synced' | 'offline' | 'error'; message: string; username: string }
-class ApiError extends Error { constructor(public status: number, message: string, public current?: CloudBoard) { super(message) } }
+class ApiError extends Error { constructor(public status: number, message: string, public current?: CloudBoard, public missingAssets?: string[]) { super(message) } }
 let state: State = { enabled: false, state: 'local', message: '', username: '' }
 let session: Session | null = null
 try { session = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null') } catch { /* Local mode. */ }
@@ -27,7 +27,7 @@ let pushGeneration = 0
 let listening = false
 let pushSession: Session | null = null
 let stopPush: (() => void) | null = null
-const uploadedAssets = new Set<string>()
+const uploadedAssets = new Map<string, number>()
 
 function endpoint(value: string) {
   const url = new URL(value || location.origin)
@@ -42,7 +42,7 @@ async function api(active: Session, path: string, init: RequestInit = {}) {
   })
   if (!response.ok) {
     const value = await response.json().catch(() => ({ error: '服务器响应无效' }))
-    throw new ApiError(response.status, value.error || '同步失败', value.current)
+    throw new ApiError(response.status, value.error || '同步失败', value.current, value.missingAssets)
   }
   return response
 }
@@ -98,25 +98,30 @@ async function downloadAssets(active: Session, doc: CanvasFile | null) {
 }
 async function send(active: Session, board: CloudBoard, remote: CloudBoard, supportsChanges: boolean) {
   const known = new Set(assetRefs(remote.doc)), key = `${active.endpoint}:${active.vaultId}:`
-  const missing = assetRefs(board.doc).filter((ref) => !known.has(ref) && !uploadedAssets.has(key + ref))
+  const missing = assetRefs(board.doc).filter((ref) => !known.has(ref) && (uploadedAssets.get(key + ref) ?? 0) <= Date.now() - ASSET_RETENTION_MS)
   let cursor = 0, completed = 0
   const uploads = await Promise.allSettled(Array.from({ length: Math.min(3, missing.length) }, async () => {
     while (cursor < missing.length) {
       const ref = missing[cursor++]
       publish({ state: 'syncing', message: `正在上传附件 ${completed}/${missing.length}` })
       await uploadAsset(active, ref)
-      uploadedAssets.add(key + ref)
+      uploadedAssets.set(key + ref, Date.now())
       publish({ state: 'syncing', message: `正在上传附件 ${++completed}/${missing.length}` })
     }
   }))
   const failure = uploads.find((result) => result.status === 'rejected')
   if (failure?.status === 'rejected') throw failure.reason
   const incremental = supportsChanges && remote.doc !== null && board.doc !== null
-  const result = await (await api(active, `boards/${encodeURIComponent(board.id)}`, {
-    method: incremental ? 'PATCH' : 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ baseRevision: board.revision, ...(incremental ? { changes: canvasChanges(remote.doc!, board.doc!) } : { doc: board.doc }) }),
-  })).json()
-  return { ...result, doc: result.doc === undefined ? board.doc : result.doc } as CloudBoard
+  try {
+    const result = await (await api(active, `boards/${encodeURIComponent(board.id)}`, {
+      method: incremental ? 'PATCH' : 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseRevision: board.revision, ...(incremental ? { changes: canvasChanges(remote.doc!, board.doc!) } : { doc: board.doc }) }),
+    })).json()
+    return { ...result, doc: result.doc === undefined ? board.doc : result.doc } as CloudBoard
+  } catch (error) {
+    if (error instanceof ApiError) for (const ref of error.missingAssets ?? []) uploadedAssets.delete(key + ref)
+    throw error
+  }
 }
 function schedule(delay = 500) {
   if (timer) clearTimeout(timer)
@@ -206,7 +211,7 @@ async function synchronize(active: Session) {
     if (!equal(merged.doc, remote.doc)) {
       try { result = await send(active, { id, revision: remote.revision, doc: merged.doc }, remote, currentSession.changes === true) }
       catch (error) {
-        if (error instanceof ApiError && error.status === 409 && error.current) { pending = true; continue }
+        if (error instanceof ApiError && error.status === 409 && (error.current || error.missingAssets?.length)) { pending = true; continue }
         throw error
       }
     }

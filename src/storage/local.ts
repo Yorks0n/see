@@ -1,10 +1,11 @@
 import type { CanvasFile, CanvasNode } from '../types'
-import { cloudCanvas, equal, type SyncBase } from '../sync/protocol'
+import { ASSET_RETENTION_MS, assetRefs, cloudCanvas, equal, type SyncBase } from '../sync/protocol'
 
 export const DATABASE_NAME = 'whiteboard-db'
 export const RECOVERY_PREFIX = 'see-local-recovery:'
 const ASSET_PREFIX = 'see-asset:'
 const LEGACY_RECOVERY = 'see-recovery-canvas'
+const GC_PREFIX = 'asset-gc:'
 
 interface StoredCanvas {
   schemaVersion: 1
@@ -122,6 +123,52 @@ export class LocalRepository {
     return pending
   }
 
+  // Scan and update deadlines in the same transaction as document changes so
+  // another tab cannot add a reference between the scan and attachment deletion.
+  private retainAssets(tx: IDBTransaction, now: number, collect = false, done?: (next: number | null) => void, fail?: (error: Error) => void) {
+    const store = tx.objectStore('kv'), referenced = new Set<string>(), deadlines = new Map<string, number>()
+    const records = store.openCursor()
+    records.onsuccess = () => {
+      try {
+        const cursor = records.result
+        if (cursor) {
+          const key = String(cursor.key)
+          if (key.startsWith('canvas:')) for (const ref of assetRefs(record(cursor.value)?.doc ?? null)) referenced.add(ASSET_PREFIX + ref)
+          if (key.startsWith(GC_PREFIX)) deadlines.set(key.slice(GC_PREFIX.length), cursor.value)
+          cursor.continue()
+          return
+        }
+        let next: number | null = null
+        const assets = tx.objectStore('assets').openKeyCursor()
+        assets.onsuccess = () => {
+          try {
+            const asset = assets.result
+            if (!asset) { done?.(next); return }
+            const ref = String(asset.key), key = GC_PREFIX + ref
+            if (referenced.has(ref)) store.delete(key)
+            else {
+              const deadline = deadlines.get(ref) ?? now + ASSET_RETENTION_MS
+              if (collect && deadline <= now) {
+                tx.objectStore('assets').delete(ref)
+                store.delete(key)
+              } else {
+                store.put(deadline, key)
+                next = Math.min(next ?? deadline, deadline)
+              }
+            }
+            asset.continue()
+          } catch (error) { if (fail) fail(error as Error); else tx.abort() }
+        }
+      } catch (error) { if (fail) fail(error as Error); else tx.abort() }
+    }
+  }
+
+  collectGarbage(now = Date.now()): Promise<number | null> {
+    return this.enqueue(() => this.transaction(['kv', 'assets'], 'readwrite', (tx, done, fail) => {
+      this.retainAssets(tx, now, true, done, fail)
+    }))
+  }
+
   private read(id: string) {
     return this.transaction<StoredCanvas | null>(['kv'], 'readonly', (tx, done, fail) => {
       const request = tx.objectStore('kv').get(`canvas:${id}`)
@@ -182,8 +229,22 @@ export class LocalRepository {
   }
 
   private async prepare(doc: CanvasFile) {
-    const urls = new Set<string>()
-    mapMedia(doc, (url) => { if (/^(data:|blob:)/.test(url) && !this.media.has(url)) urls.add(url); return url })
+    const urls = new Set<string>(), cached = new Map<string, string>()
+    mapMedia(doc, (url) => {
+      if (/^(data:|blob:)/.test(url)) {
+        const ref = this.media.get(url)
+        if (ref) cached.set(url, ref)
+        else urls.add(url)
+      }
+      return url
+    })
+    if (cached.size) await this.transaction<void>(['assets'], 'readonly', (tx, done) => {
+      for (const [url, ref] of cached) {
+        const request = tx.objectStore('assets').getKey(ref)
+        request.onsuccess = () => { if (request.result === undefined) urls.add(url) }
+      }
+      done()
+    })
     const assets = new Map<string, Blob>(), replacements = new Map(this.media)
     await Promise.all([...urls].map(async (url) => {
       const response = await fetch(url)
@@ -200,7 +261,7 @@ export class LocalRepository {
 
   save(id: string, doc: CanvasFile): Promise<void> {
     // Capture before any await; a file switch must never change the target or contents.
-    const snapshot = structuredClone(this.compact(doc))
+    const snapshot = structuredClone(doc)
     return this.enqueue(async () => {
       const prepared = await this.prepare(snapshot)
       const expected = this.revisions.get(id) ?? 0
@@ -216,6 +277,7 @@ export class LocalRepository {
             mapMedia(prepared.doc, (url) => { if (url.startsWith(ASSET_PREFIX) && !prepared.assets.has(url)) refs.add(url); return url })
             const commit = () => {
               store.put({ schemaVersion: 1, revision: next, savedAt: Date.now(), doc: prepared.doc } satisfies StoredCanvas, `canvas:${id}`)
+              if (prepared.assets.size || !equal(assetRefs(current?.doc ?? null), assetRefs(prepared.doc))) this.retainAssets(tx, Date.now(), false, undefined, fail)
               done({ revision: next, contentChanged: !equal(cloudCanvas(current?.doc ?? null), cloudCanvas(prepared.doc)) })
             }
             if (!refs.size) commit()
@@ -251,13 +313,14 @@ export class LocalRepository {
   delete(id: string): Promise<void> {
     return this.enqueue(async () => {
       const expected = this.revisions.get(id) ?? 0
-      await this.transaction<void>(['kv'], 'readwrite', (tx, done, fail) => {
+      await this.transaction<void>(['kv', 'assets'], 'readwrite', (tx, done, fail) => {
         const store = tx.objectStore('kv'), request = store.get(`canvas:${id}`)
         request.onsuccess = () => {
           try {
             const current = record(request.result)
             if ((current?.revision ?? 0) !== expected) throw new StorageConflictError()
             store.put({ schemaVersion: 1, revision: expected + 1, savedAt: Date.now(), doc: null } satisfies StoredCanvas, `canvas:${id}`)
+            this.retainAssets(tx, Date.now(), false, undefined, fail)
             done()
           } catch (error) { fail(error as Error) }
         }
@@ -266,7 +329,6 @@ export class LocalRepository {
       this.notifyWrite()
       this.notify()
       try { localStorage.removeItem(`${RECOVERY_PREFIX}${this.writer}:${id}`) } catch { /* Optional journal. */ }
-      // Assets are retained: undo, duplicates and recovery journals may still reference them.
     })
   }
 
@@ -319,9 +381,13 @@ export class LocalRepository {
     const digest = await crypto.subtle.digest('SHA-256', await new Blob([blob.type, '\0', blob]).arrayBuffer())
     const actual = [...new Uint8Array(digest)].map((n) => n.toString(16).padStart(2, '0')).join('')
     if (actual !== ref) throw new Error('下载附件校验失败，请重试')
-    await this.transaction<void>(['assets'], 'readwrite', (tx, done) => {
-      tx.objectStore('assets').put(blob, ASSET_PREFIX + ref); done()
+    await this.transaction<void>(['kv', 'assets'], 'readwrite', (tx, done) => {
+      tx.objectStore('assets').put(blob, ASSET_PREFIX + ref)
+      // A download may be awaiting a document commit; give it a fresh grace period.
+      tx.objectStore('kv').put(Date.now() + ASSET_RETENTION_MS, GC_PREFIX + ASSET_PREFIX + ref)
+      done()
     })
+    this.notifyWrite()
   }
 
   acknowledge(vault: string, id: string, base: SyncBase) {
@@ -336,7 +402,7 @@ export class LocalRepository {
 
   acceptRemote(vault: string, id: string, expected: number, remote: SyncBase, backupId?: string): Promise<void> {
     return this.enqueue(async () => {
-      await this.transaction<void>(['kv'], 'readwrite', (tx, done, fail) => {
+      await this.transaction<void>(['kv', 'assets'], 'readwrite', (tx, done, fail) => {
         const store = tx.objectStore('kv'), request = store.get(`canvas:${id}`)
         request.onsuccess = () => {
           try {
@@ -351,6 +417,7 @@ export class LocalRepository {
             const doc = remote.doc ? { ...remote.doc, meta: { ...remote.doc.meta, camera: current?.doc?.meta?.camera } } : null
             store.put({ schemaVersion: 1, revision: expected + 1, savedAt: Date.now(), doc } satisfies StoredCanvas, `canvas:${id}`)
             store.put(remote, `sync:${vault}:${id}`)
+            this.retainAssets(tx, Date.now(), false, undefined, fail)
             done()
           } catch (error) { fail(error as Error) }
         }
@@ -390,6 +457,7 @@ export class LocalRepository {
       const value = JSON.parse(raw)
       if (!value?.doc || !Array.isArray(value.doc.nodes)) throw new Error('本地恢复数据损坏，请先备份浏览器数据。')
       const modern = key.startsWith(RECOVERY_PREFIX)
+      if (modern && assetRefs(value.doc).length && value.savedAt <= Date.now() - ASSET_RETENTION_MS) { storage.removeItem(key); continue }
       const id = modern ? value.id : key === LEGACY_RECOVERY ? 'legacy-default' : key.slice(`${LEGACY_RECOVERY}:canvas:`.length)
       const current = await this.read(id)
       if (!modern && current && current.savedAt >= value.savedAt) { storage.removeItem(key); continue }

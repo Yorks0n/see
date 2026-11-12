@@ -7,6 +7,7 @@ import { localRepository, persistenceStore } from './persistence'
 import { documentStore } from './store/document'
 import { startCloudSync } from './sync/cloud'
 import { startLocalSync } from './sync/local'
+import { startAssetGarbageCollection } from './storage/garbageCollection'
 
 export default function App() {
   const [tool, setTool] = useState<ToolId>('select')
@@ -20,6 +21,10 @@ export default function App() {
     void libraryStore.initialize().catch((error: Error) => setError(error.message))
   }, [])
   useEffect(() => { setNewNodeId(null); setTool('select') }, [library.activeFileId])
+  useEffect(() => {
+    if (!library.ready) return
+    return startAssetGarbageCollection(localRepository, (error) => console.error('附件清理失败，将自动重试', error))
+  }, [library.ready])
   useEffect(() => {
     if (!library.ready) return
     return startLocalSync(localRepository,
