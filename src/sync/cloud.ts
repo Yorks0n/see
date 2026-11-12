@@ -1,6 +1,7 @@
 import { assetRefs, canvasChanges, cloudCanvas, equal, mergeCanvas, PART_SIZE, type CloudBoard } from './protocol'
 import { LocalRepository, StorageConflictError } from '../storage/local'
 import type { CanvasFile } from '../types'
+import { startCloudPush } from './push'
 
 const SETTINGS_KEY = 'see-cloud-session'
 interface Session { endpoint: string; token: string; vaultId: string; username: string }
@@ -22,6 +23,10 @@ let apply: ((action: () => Promise<void>) => Promise<boolean>) | null = null
 let running: Promise<void> | null = null
 let timer: ReturnType<typeof setTimeout> | null = null
 let localGeneration = 0
+let pushGeneration = 0
+let listening = false
+let pushSession: Session | null = null
+let stopPush: (() => void) | null = null
 const uploadedAssets = new Set<string>()
 
 function endpoint(value: string) {
@@ -51,6 +56,7 @@ export async function loginCloud(server: string, username: string, password: str
   const next: Session = { endpoint: origin, token: result.token, vaultId: result.vaultId, username: result.username }
   if (!next.token || !next.vaultId) throw new Error('登录响应无效')
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(next))
+  stopPush?.(); stopPush = null; pushSession = null
   session = next
   publish({ enabled: true, state: 'syncing', message: '', username: next.username })
   schedule()
@@ -62,6 +68,7 @@ export async function logoutCloud() {
   await api(active, 'logout', { method: 'POST' })
   localStorage.removeItem(SETTINGS_KEY)
   session = null
+  stopPush?.(); stopPush = null; pushSession = null
   publish({ enabled: false, state: 'local', message: '', username: '' })
 }
 
@@ -117,32 +124,53 @@ function schedule(delay = 500) {
 }
 export function startCloudSync(repo: LocalRepository, canApply: () => boolean, applyRemote: (action: () => Promise<void>) => Promise<boolean>) {
   repository = repo; safe = canApply; apply = applyRemote
+  listening = true
   const unsubscribe = repo.subscribe(() => {
     localGeneration++
     if (session) publish({ state: 'offline', message: '修改已保存在本机，等待同步' })
     schedule()
   })
   const interval = setInterval(() => { void syncNow() }, 5000)
-  const online = () => { void syncNow() }
+  const online = () => { pushGeneration++; void syncNow() }
+  const visible = () => { if (document.visibilityState === 'visible') online() }
   window.addEventListener('online', online)
+  window.addEventListener('focus', online)
+  document.addEventListener('visibilitychange', visible)
   void syncNow()
-  return () => { unsubscribe(); clearInterval(interval); window.removeEventListener('online', online); if (timer) clearTimeout(timer) }
+  return () => {
+    listening = false
+    unsubscribe(); clearInterval(interval)
+    window.removeEventListener('online', online)
+    window.removeEventListener('focus', online)
+    document.removeEventListener('visibilitychange', visible)
+    if (timer) clearTimeout(timer)
+    stopPush?.(); stopPush = null; pushSession = null
+  }
 }
 export function syncNow(): Promise<void> {
   if (running) return running
   if (!session || !repository || !safe || !apply) return Promise.resolve()
   const active = session
+  const generation = pushGeneration
   running = synchronize(active).catch((error) => {
     if (error instanceof StorageConflictError) { publish({ state: 'offline', message: '本地内容正在更新，将自动重试' }); return }
     const offline = !navigator.onLine || error instanceof TypeError || (error instanceof DOMException && error.name === 'TimeoutError')
     publish({ state: offline ? 'offline' : 'error', message: offline ? '修改已保存在本机，连接恢复后继续同步' : error instanceof Error ? error.message : '同步失败' })
-  }).finally(() => { running = null })
+  }).finally(() => {
+    running = null
+    if (listening && session === active && generation !== pushGeneration) schedule(0)
+  })
   return running
 }
 async function synchronize(active: Session) {
   if (!navigator.onLine) { publish({ state: 'offline', message: '修改已保存在本机，连接恢复后继续同步' }); return }
   const currentSession = await (await api(active, 'session')).json()
   if (currentSession.vaultId !== active.vaultId) throw new Error('服务器数据仓库已变化，请重新登录')
+  if (listening && session === active && currentSession.push && typeof WebSocket !== 'undefined' && pushSession !== active) {
+    stopPush?.()
+    pushSession = active
+    stopPush = startCloudPush(active.endpoint, active.token, () => { pushGeneration++; schedule(0) })
+  }
   const generation = localGeneration
   const local = await repository!.syncEntries(active.vaultId)
   const listing = await (await api(active, 'boards')).json() as { boards: { id: string; revision: number }[] }

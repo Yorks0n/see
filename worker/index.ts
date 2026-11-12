@@ -90,19 +90,43 @@ export class SeeVault extends DurableObject<Env> {
     this.sql.exec('INSERT INTO sessions VALUES (?, ?, ?)', await hash(token), expiresAt, await hash(this.env.PASSWORD_HASH))
     return json({ token, expiresAt, vaultId: this.vaultId, username: this.env.USERNAME })
   }
-  private async authenticate(request: Request) {
-    const token = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1]
+  private async authenticate(request: Request, token = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1]) {
     if (!token || !this.env.PASSWORD_HASH) throw new HttpError(401, '请重新登录')
     const key = await hash(token)
     const session = this.sql.exec<{ expires: number; password_version: string }>('SELECT expires, password_version FROM sessions WHERE token = ?', key).toArray()[0]
     if (!session || session.expires < Date.now() || session.password_version !== await hash(this.env.PASSWORD_HASH)) throw new HttpError(401, '请重新登录')
     return key
   }
+  private async broadcast(id: string, revision: number) {
+    if (!this.ctx.getWebSockets().length) return
+    const passwordVersion = await hash(this.env.PASSWORD_HASH)
+    const message = JSON.stringify({ type: 'changed', id, revision })
+    for (const socket of this.ctx.getWebSockets()) {
+      const { token } = socket.deserializeAttachment() as { token: string }
+      const session = this.sql.exec<{ expires: number; password_version: string }>('SELECT expires, password_version FROM sessions WHERE token = ?', token).toArray()[0]
+      if (!session || session.expires < Date.now() || session.password_version !== passwordVersion) { socket.close(1008, '请重新登录'); continue }
+      try { socket.send(message) } catch { socket.close(1011, '连接已断开') }
+    }
+  }
+  private connectEvents(token: string) {
+    const { 0: client, 1: server } = new WebSocketPair()
+    server.serializeAttachment({ token })
+    this.ctx.acceptWebSocket(server, [token])
+    server.send(JSON.stringify({ type: 'ready' }))
+    return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Protocol': 'see-sync' } })
+  }
+  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) {
+    if (message === 'ping') socket.send('pong')
+    else socket.close(1008, '无效的消息')
+  }
+  webSocketClose(socket: WebSocket, code: number, reason: string) { socket.close(code, reason) }
+  webSocketError(socket: WebSocket) { socket.close(1011, '连接已断开') }
   private async saveBoard(request: Request, id: string) {
     const input = await body(request)
     if (!Number.isSafeInteger(input.baseRevision) || input.baseRevision < 0) throw new HttpError(400, '无效的白板数据')
     // There are no awaits between checking the revision and committing the transaction.
-    return this.ctx.storage.transactionSync(() => {
+    let changedRevision: number | undefined
+    const response = this.ctx.storage.transactionSync(() => {
       const current = this.getBoard(id)
       if (current.revision !== input.baseRevision) return json({ error: '白板已有更新', current }, 409)
       if (request.method === 'PATCH') {
@@ -120,8 +144,11 @@ export class SeeVault extends DurableObject<Env> {
       this.sql.exec('INSERT INTO boards VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, doc = excluded.doc, updated = excluded.updated', id, revision, serialized, updated)
       this.sql.exec('INSERT INTO history VALUES (?, ?, ?, ?)', id, revision, serialized, updated)
       this.sql.exec('DELETE FROM history WHERE id = ? AND revision <= ?', id, revision - 50)
+      changedRevision = revision
       return json({ id, revision, ...(request.method === 'PATCH' ? {} : { doc: input.doc }) })
     })
+    if (changedRevision !== undefined) await this.broadcast(id, changedRevision)
+    return response
   }
   private async startUpload(request: Request) {
     const input = await body(request, 4096)
@@ -198,9 +225,20 @@ export class SeeVault extends DurableObject<Env> {
       const path = new URL(request.url).pathname.split('/').filter(Boolean).map(decodeURIComponent), method = request.method
       if (path[1] === 'config' && method === 'GET') return json({ available: true, configured: !!this.env.PASSWORD_HASH })
       if (path[1] === 'login' && method === 'POST') return await this.login(request)
-      const token = await this.authenticate(request)
-      if (path[1] === 'session' && method === 'GET') return json({ vaultId: this.vaultId, username: this.env.USERNAME, changes: true })
-      if (path[1] === 'logout' && method === 'POST') { this.sql.exec('DELETE FROM sessions WHERE token = ?', token); return json({ ok: true }) }
+      const events = path[1] === 'events' && method === 'GET'
+      const protocols = events ? request.headers.get('Sec-WebSocket-Protocol')?.split(',').map((value) => value.trim()) ?? [] : []
+      const credential = protocols.find((value) => /^see-auth\.[a-f0-9]{64}$/.test(value))?.slice('see-auth.'.length)
+      const token = await this.authenticate(request, events ? credential : undefined)
+      if (events) {
+        if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket' || !protocols.includes('see-sync')) throw new HttpError(426, '需要 WebSocket 连接')
+        return this.connectEvents(token)
+      }
+      if (path[1] === 'session' && method === 'GET') return json({ vaultId: this.vaultId, username: this.env.USERNAME, changes: true, push: true })
+      if (path[1] === 'logout' && method === 'POST') {
+        this.sql.exec('DELETE FROM sessions WHERE token = ?', token)
+        for (const socket of this.ctx.getWebSockets(token)) socket.close(1008, '已退出登录')
+        return json({ ok: true })
+      }
       if (path[1] === 'boards') {
         const id = path[2]
         if (!id && method === 'GET') return json({ boards: this.sql.exec<{ id: string; revision: number }>('SELECT id, revision FROM boards ORDER BY id').toArray() })

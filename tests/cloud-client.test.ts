@@ -12,6 +12,7 @@ test('client persists offline edits, merges after reconnect, retries races and p
   Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() })
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } })
   Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() })
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: Object.assign(new EventTarget(), { visibilityState: 'visible' }) })
   const originalFetch = globalThis.fetch
   let connected = true, race = false, sessionError = false
   const remote = new Map<string, { id: string; revision: number; doc: CanvasFile | null }>()
@@ -203,4 +204,100 @@ test('image-heavy sync uploads concurrently, resumes failures and sends only cha
     assert.equal(remote.get('media-board')!.doc!.nodes![1].y, 20)
     assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
   } finally { stop(); globalThis.fetch = originalFetch }
+})
+
+test('server push refreshes an open device, retains changes arriving during a sync and catches up after reconnect', async () => {
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() })
+  const originalFetch = globalThis.fetch, originalSocket = globalThis.WebSocket
+  class Socket {
+    static OPEN = 1
+    static CLOSED = 3
+    static instances: Socket[] = []
+    readyState = 0
+    onopen: (() => void) | null = null
+    onmessage: ((event: { data: string }) => void) | null = null
+    onclose: ((event: { code: number }) => void) | null = null
+    onerror: (() => void) | null = null
+    constructor(readonly url: URL, readonly protocols: string[]) {
+      Socket.instances.push(this)
+      queueMicrotask(() => {
+        if (this.readyState === Socket.CLOSED) return
+        this.readyState = Socket.OPEN
+        this.onopen?.()
+        this.message({ type: 'ready' })
+      })
+    }
+    message(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }) }
+    send(value: string) { if (value === 'ping') this.onmessage?.({ data: 'pong' }) }
+    close() { this.readyState = Socket.CLOSED; this.onclose?.({ code: 1000 }) }
+  }
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: Socket })
+  const repo = new LocalRepository()
+  const doc: CanvasFile = { nodes: [], edges: [], meta: { name: 'initial' } }
+  await repo.save('push-board', doc)
+  let remote = { id: 'push-board', revision: 1, doc }
+  let name = 'initial', blocked = false, hold = false, release: (() => void) | null = null
+  const until = async (check: () => boolean) => {
+    const deadline = Date.now() + 3000
+    while (!check()) {
+      assert.ok(Date.now() < deadline, 'expected push to update the device without polling')
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+  globalThis.fetch = async (input) => {
+    const path = new URL(String(input)).pathname.replace('/api/', '')
+    if (path === 'login') return Response.json({ token: 'c'.repeat(64), vaultId: 'push-vault', username: 'owner' })
+    if (path === 'session') return Response.json({ vaultId: 'push-vault', changes: true, push: true })
+    if (path === 'boards') {
+      const listing = { boards: [{ id: remote.id, revision: remote.revision }] }
+      if (hold) { hold = false; await new Promise<void>((resolve) => { release = resolve }) }
+      return Response.json(listing)
+    }
+    return Response.json(remote)
+  }
+  const cloud = await import('../src/sync/cloud')
+  await cloud.loginCloud('https://see.example', 'owner', 'password')
+  const stop = cloud.startCloudSync(repo, () => !blocked, async (action) => {
+    if (blocked) return false
+    await action()
+    name = (await repo.load('push-board'))!.meta!.name!
+    return true
+  })
+  const change = (next: string) => {
+    remote = { ...remote, revision: remote.revision + 1, doc: { ...doc, meta: { name: next } } }
+    Socket.instances.at(-1)!.message({ type: 'changed', id: remote.id, revision: remote.revision })
+  }
+  try {
+    await cloud.syncNow()
+    await until(() => Socket.instances.length === 1)
+    assert.equal(Socket.instances[0].url.href, 'wss://see.example/api/events')
+    assert.deepEqual(Socket.instances[0].protocols, ['see-sync', `see-auth.${'c'.repeat(64)}`])
+    change('pushed')
+    await until(() => name === 'pushed')
+    // Deliberately return a stale listing while a notification is already in flight.
+    hold = true
+    const syncing = cloud.syncNow()
+    await until(() => release !== null)
+    change('arrived during sync')
+    release!()
+    await syncing
+    await until(() => name === 'arrived during sync')
+    blocked = true
+    change('wait for editing')
+    await cloud.syncNow()
+    assert.equal(name, 'arrived during sync')
+    blocked = false
+    window.dispatchEvent(new Event('focus'))
+    await until(() => name === 'wait for editing')
+    Socket.instances[0].close()
+    remote = { ...remote, revision: remote.revision + 1, doc: { ...doc, meta: { name: 'missed while disconnected' } } }
+    await until(() => Socket.instances.length === 2 && name === 'missed while disconnected')
+    assert.equal(Socket.instances[1].readyState, Socket.OPEN)
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+  } finally {
+    stop()
+    assert.ok(Socket.instances.every((socket) => socket.readyState === Socket.CLOSED))
+    globalThis.fetch = originalFetch
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalSocket })
+  }
 })

@@ -6,6 +6,7 @@ import type { ToolId } from './tools/tools'
 import { localRepository, persistenceStore } from './persistence'
 import { documentStore } from './store/document'
 import { startCloudSync } from './sync/cloud'
+import { startLocalSync } from './sync/local'
 
 export default function App() {
   const [tool, setTool] = useState<ToolId>('select')
@@ -19,6 +20,12 @@ export default function App() {
     void libraryStore.initialize().catch((error: Error) => setError(error.message))
   }, [])
   useEffect(() => { setNewNodeId(null); setTool('select') }, [library.activeFileId])
+  useEffect(() => {
+    if (!library.ready) return
+    return startLocalSync(localRepository,
+      () => libraryStore.refreshLocalChanges(),
+      (error) => setError(error instanceof Error ? error.message : '无法读取其他窗口的更新'))
+  }, [library.ready])
   useEffect(() => {
     if (!library.ready) return
     return startCloudSync(localRepository,

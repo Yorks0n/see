@@ -2,6 +2,7 @@ import { deleteLocalFile, downloadCanvasFile, initializeLocal, localRepository, 
 import type { CanvasFile } from '../types'
 import { cameraStore } from './camera'
 import { documentStore, uid } from './document'
+import { cloudCanvas, equal } from '../sync/protocol'
 
 export const LIBRARY_KEY = 'see-file-library'
 export interface BoardFile { id: string; name: string; pinned?: boolean }
@@ -173,12 +174,21 @@ export class LibraryStore {
   }
   async applyCloudChange(action: () => Promise<void>): Promise<boolean> {
     if (this.state.busy || documentStore.isInteracting || persistenceStore.getSnapshot().state !== 'saved') return false
+    if (typeof document !== 'undefined' && document.activeElement?.closest('input, textarea, select, [contenteditable="true"]')) return false
     this.emit({ busy: true })
     try {
       await action()
       await this.refreshFromStorage(true)
       return true
     } finally { this.emit({ busy: false }) }
+  }
+  async refreshLocalChanges(): Promise<boolean> {
+    if (this.state.busy || documentStore.isInteracting || persistenceStore.getSnapshot().state !== 'saved') return false
+    const files = await localRepository.list()
+    const changed = files.length !== this.state.files.length
+      || files.some((file) => !this.state.files.some((current) => current.id === file.id && current.name === file.name))
+      || (this.state.activeFileId !== null && await localRepository.hasExternalChange(this.state.activeFileId))
+    return changed ? this.applyCloudChange(async () => {}) : true
   }
   async refreshFromStorage(locked = false) {
     if (this.state.busy && !locked) return
@@ -190,9 +200,13 @@ export class LibraryStore {
       if (!active) { await this.addFile('未命名白板'); return }
       const doc = await loadLocal(active.id)
       if (!doc) return
-      setActiveFile(active.id)
+      const sameFile = active.id === this.state.activeFileId
+      const camera = cameraStore.getSnapshot()
+      const changed = !sameFile || !equal(cloudCanvas(doc), cloudCanvas(documentStore.getSnapshot()))
+      if (!sameFile) setActiveFile(active.id)
       this.emit({ files, activeFileId: active.id })
-      this.applyDocument(doc)
+      if (changed) this.applyDocument(sameFile ? { ...doc, meta: { ...doc.meta, camera } } : doc)
+      else markLoaded()
       this.persist()
     } finally { this.emit({ busy: false }) }
   }

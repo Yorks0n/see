@@ -15,7 +15,8 @@ import { LASER_LIFETIME, LaserTrail } from '../src/tools/laser'
 import { TouchNavigation } from '../src/tools/touchNavigation'
 import { editingCamera } from '../src/render/editing'
 import { inViewport } from '../src/render/viewport'
-import { deleteLocalFile, importCanvasFile, initializeLocal, loadLocal, saveCanvas, saveLocal, saveRecovery, setActiveFile } from '../src/persistence'
+import { deleteLocalFile, importCanvasFile, initializeLocal, loadLocal, markDirty, persistenceStore, saveCanvas, saveLocal, saveRecovery, setActiveFile } from '../src/persistence'
+import { LocalRepository } from '../src/storage/local'
 import { LIBRARY_KEY, LibraryStore } from '../src/store/library'
 import { cropImage, uncroppedBounds, type CropHandle } from '../src/tools/imageCrop'
 import { CLIPBOARD_MIME, copySelection, pasteSelection, readClipboard, writeClipboard } from '../src/tools/clipboard'
@@ -1697,6 +1698,30 @@ test('file library migrates content, manages independent boards, and flattens le
     await library.switchFile(first.id)
     assert.ok(documentStore.getNode('legacy'))
     const activeBefore = documentStore.toJSON(), cameraBefore = cameraStore.getSnapshot()
+    let busyChanges = 0
+    const stopBusy = library.subscribe(() => { if (library.getSnapshot().busy) busyChanges++ })
+    assert.equal(await library.refreshLocalChanges(), true)
+    stopBusy()
+    assert.equal(busyChanges, 0, 'focusing an unchanged board does not interrupt an input by locking the UI')
+    const otherWindow = new LocalRepository()
+    const remoteDoc = (await otherWindow.load(first.id))!
+    await otherWindow.save(first.id, { ...remoteDoc, meta: { ...remoteDoc.meta, camera: { x: 900, y: 800, zoom: 2 } } })
+    const historyBefore = documentStore.canUndo
+    assert.equal(await library.refreshLocalChanges(), true)
+    assert.deepEqual(cameraStore.getSnapshot(), cameraBefore, 'other windows do not move this window viewport')
+    assert.equal(documentStore.canUndo, historyBefore, 'unchanged content does not clear undo')
+    await otherWindow.save(first.id, { ...remoteDoc, nodes: [...remoteDoc.nodes!, card('remote-card')] })
+    markDirty()
+    assert.equal(await library.applyCloudChange(async () => {}), false, 'uncommitted local edits block external updates')
+    assert.equal(documentStore.getNode('remote-card'), undefined)
+    // Returning to the saved document allows the queued external update to apply.
+    await saveLocal()
+    assert.equal(persistenceStore.getSnapshot().state, 'saved')
+    assert.equal(await library.applyCloudChange(async () => {}), true)
+    assert.ok(documentStore.getNode('remote-card'))
+    assert.deepEqual(cameraStore.getSnapshot(), cameraBefore)
+    documentStore.load(activeBefore)
+    await saveLocal()
     await library.renameFile(second.id, '后台重命名')
     assert.deepEqual(documentStore.toJSON(), activeBefore)
     assert.deepEqual(cameraStore.getSnapshot(), cameraBefore)

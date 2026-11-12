@@ -19,6 +19,7 @@ try {
           tldraw: new URL('../tests/tldraw.test.ts', import.meta.url).pathname,
           sync: new URL('../tests/sync.test.ts', import.meta.url).pathname,
           'cloud-client': new URL('../tests/cloud-client.test.ts', import.meta.url).pathname,
+          'local-sync': new URL('../tests/local-sync.test.ts', import.meta.url).pathname,
         },
         formats: ['es'],
         fileName: (_format, name) => `${name}.test.mjs`,
@@ -26,7 +27,7 @@ try {
       rollupOptions: { external: ['node:test', 'node:assert/strict'] },
     },
   })
-  const result = spawnSync(process.execPath, ['--test', ...['whiteboard', 'persistence', 'tldraw', 'sync', 'cloud-client'].map((name) => join(outDir, `${name}.test.mjs`))], { stdio: 'inherit' })
+  const result = spawnSync(process.execPath, ['--test', ...['whiteboard', 'persistence', 'tldraw', 'sync', 'cloud-client', 'local-sync'].map((name) => join(outDir, `${name}.test.mjs`))], { stdio: 'inherit' })
   process.exitCode = result.status ?? 1
 } finally {
   await rm(outDir, { recursive: true, force: true })

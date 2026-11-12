@@ -76,9 +76,12 @@ export class LocalRepository {
   private tail: Promise<unknown> = Promise.resolve()
   private writer = crypto.randomUUID()
   private listeners = new Set<() => void>()
+  private writeListeners = new Set<() => void>()
   constructor(private name = DATABASE_NAME) {}
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
+  subscribeWrites = (listener: () => void) => { this.writeListeners.add(listener); return () => { this.writeListeners.delete(listener) } }
   private notify() { this.listeners.forEach((listener) => listener()) }
+  private notifyWrite() { this.writeListeners.forEach((listener) => listener()) }
 
   private open(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
@@ -173,6 +176,10 @@ export class LocalRepository {
     this.revisions.set(id, saved?.revision ?? 0)
     return doc
   }
+  async hasExternalChange(id: string): Promise<boolean> {
+    await this.tail
+    return ((await this.read(id))?.revision ?? 0) !== (this.revisions.get(id) ?? 0)
+  }
 
   private async prepare(doc: CanvasFile) {
     const urls = new Set<string>()
@@ -226,6 +233,7 @@ export class LocalRepository {
         }
       })
       this.revisions.set(id, saved.revision)
+      this.notifyWrite()
       // View changes are persisted locally without scheduling a cloud sync.
       if (saved.contentChanged) this.notify()
       prepared.replacements.forEach((ref, url) => this.media.set(url, ref))
@@ -255,6 +263,7 @@ export class LocalRepository {
         }
       })
       this.revisions.set(id, expected + 1)
+      this.notifyWrite()
       this.notify()
       try { localStorage.removeItem(`${RECOVERY_PREFIX}${this.writer}:${id}`) } catch { /* Optional journal. */ }
       // Assets are retained: undo, duplicates and recovery journals may still reference them.
@@ -326,25 +335,28 @@ export class LocalRepository {
   }
 
   acceptRemote(vault: string, id: string, expected: number, remote: SyncBase, backupId?: string): Promise<void> {
-    return this.enqueue(() => this.transaction<void>(['kv'], 'readwrite', (tx, done, fail) => {
-      const store = tx.objectStore('kv'), request = store.get(`canvas:${id}`)
-      request.onsuccess = () => {
-        try {
-          const current = record(request.result)
-          if ((current?.revision ?? 0) !== expected) throw new StorageConflictError()
-          if (backupId && current?.doc) {
-            store.put({
-              schemaVersion: 1, revision: 1, savedAt: Date.now(),
-              doc: { ...current.doc, meta: { ...current.doc.meta, name: `${current.doc.meta?.name || '白板'}（冲突副本）` } },
-            } satisfies StoredCanvas, `canvas:${backupId}`)
-          }
-          const doc = remote.doc ? { ...remote.doc, meta: { ...remote.doc.meta, camera: current?.doc?.meta?.camera } } : null
-          store.put({ schemaVersion: 1, revision: expected + 1, savedAt: Date.now(), doc } satisfies StoredCanvas, `canvas:${id}`)
-          store.put(remote, `sync:${vault}:${id}`)
-          done()
-        } catch (error) { fail(error as Error) }
-      }
-    }))
+    return this.enqueue(async () => {
+      await this.transaction<void>(['kv'], 'readwrite', (tx, done, fail) => {
+        const store = tx.objectStore('kv'), request = store.get(`canvas:${id}`)
+        request.onsuccess = () => {
+          try {
+            const current = record(request.result)
+            if ((current?.revision ?? 0) !== expected) throw new StorageConflictError()
+            if (backupId && current?.doc) {
+              store.put({
+                schemaVersion: 1, revision: 1, savedAt: Date.now(),
+                doc: { ...current.doc, meta: { ...current.doc.meta, name: `${current.doc.meta?.name || '白板'}（冲突副本）` } },
+              } satisfies StoredCanvas, `canvas:${backupId}`)
+            }
+            const doc = remote.doc ? { ...remote.doc, meta: { ...remote.doc.meta, camera: current?.doc?.meta?.camera } } : null
+            store.put({ schemaVersion: 1, revision: expected + 1, savedAt: Date.now(), doc } satisfies StoredCanvas, `canvas:${id}`)
+            store.put(remote, `sync:${vault}:${id}`)
+            done()
+          } catch (error) { fail(error as Error) }
+        }
+      })
+      this.notifyWrite()
+    })
   }
 
   // Legacy stores remain readable until each import has committed. A stale recovery

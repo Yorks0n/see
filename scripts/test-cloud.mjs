@@ -12,6 +12,7 @@ async function request(path, { token, body, ...init } = {}) {
   })
 }
 assert.equal((await request('boards')).status, 401)
+assert.equal((await request('events')).status, 401)
 assert.equal((await request('assets/' + 'a'.repeat(64))).status, 401)
 assert.equal((await request('login', { method: 'POST', body: { username: 'owner', password: 'wrong-password' } })).status, 401)
 assert.equal((await request('login', { method: 'POST', headers: { Origin: 'https://untrusted.invalid' }, body: { username: 'owner', password } })).status, 403)
@@ -21,15 +22,44 @@ const { token, vaultId } = await login.json()
 assert.ok(token && vaultId)
 assert.equal((await request('session', { token })).status, 200)
 assert.equal((await (await request('session', { token })).json()).changes, true)
+assert.equal((await (await request('session', { token })).json()).push, true)
+assert.equal((await request('events', { token })).status, 426)
+
+function subscribe(credential) {
+  const socket = new WebSocket(origin.replace('http:', 'ws:') + '/api/events', ['see-sync', `see-auth.${credential}`])
+  const messages = [], waiting = []
+  socket.addEventListener('message', (event) => {
+    const value = event.data === 'pong' ? 'pong' : JSON.parse(event.data)
+    const resolve = waiting.shift()
+    if (resolve) resolve(value)
+    else messages.push(value)
+  })
+  return {
+    socket,
+    next: () => Promise.race([
+      messages.length ? Promise.resolve(messages.shift()) : new Promise((resolve) => waiting.push(resolve)),
+      new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('push message timed out')), 3000); timer.unref() }),
+    ]),
+  }
+}
+const firstDevice = subscribe(token), secondDevice = subscribe(token)
+assert.deepEqual(await firstDevice.next(), { type: 'ready' })
+assert.deepEqual(await secondDevice.next(), { type: 'ready' })
+assert.equal(firstDevice.socket.protocol, 'see-sync')
+const expectChange = async (revision) => {
+  for (const device of [firstDevice, secondDevice]) assert.deepEqual(await device.next(), { type: 'changed', id, revision })
+}
 
 const id = 'integration-' + randomUUID()
 const doc = { nodes: [{ id: 'text', type: 'text', text: 'hello', x: 0, y: 0, width: 100, height: 50 }], edges: [], meta: { name: id } }
 const save = (revision, value) => request(`boards/${id}`, { method: 'PUT', token, body: { baseRevision: revision, doc: value } })
 assert.equal((await save(0, doc)).status, 200)
+await expectChange(1)
 const racing = await Promise.all([save(1, { ...doc, meta: { name: 'left' } }), save(1, { ...doc, meta: { name: 'right' } })])
 assert.deepEqual(racing.map((response) => response.status).sort(), [200, 409])
 const current = await (await request(`boards/${id}`, { token })).json()
 assert.equal(current.revision, 2)
+await expectChange(2)
 assert.equal((await save(0, doc)).status, 409)
 assert.equal((await request(`boards/${id}/history`, { token })).status, 200)
 assert.deepEqual((await (await request(`boards/${id}/history/1`, { token })).json()).doc, doc)
@@ -79,18 +109,28 @@ if (!svgUpload.complete) {
 assert.deepEqual(new Uint8Array(await (await request(`assets/${svgHash}`, { token })).arrayBuffer()), svg)
 const mediaDoc = { ...doc, nodes: [...doc.nodes, { id: 'image', type: 'image', x: 0, y: 0, width: 10, height: 10, url: `see-asset:${digest}` }] }
 assert.equal((await save(2, mediaDoc)).status, 200)
+await expectChange(3)
 const changes = { nodes: { upsert: [{ ...mediaDoc.nodes[1], x: 20 }], remove: [] }, edges: { upsert: [], remove: [] } }
 const patch = (revision, value) => request(`boards/${id}`, { method: 'PATCH', token, body: { baseRevision: revision, changes: value } })
 const patched = await patch(3, changes)
 assert.equal(patched.status, 200, await patched.clone().text())
 assert.deepEqual(await patched.json(), { id, revision: 4 })
+await expectChange(4)
 assert.deepEqual((await (await request(`boards/${id}`, { token })).json()).doc, { ...mediaDoc, nodes: [mediaDoc.nodes[0], { ...mediaDoc.nodes[1], x: 20 }] })
 assert.equal((await patch(3, changes)).status, 409)
 assert.equal((await patch(4, { ...changes, nodes: { ...changes.nodes, order: ['image'] } })).status, 400)
 assert.equal((await patch(4, { ...changes, nodes: { upsert: [{ ...mediaDoc.nodes[1], url: `see-asset:${svgHash}` }], remove: [] } })).status, 200)
+await expectChange(5)
 assert.equal((await save(5, null)).status, 200)
+await expectChange(6)
 assert.equal((await patch(6, changes)).status, 409)
 assert.equal((await save(6, mediaDoc)).status, 409)
+for (const device of [firstDevice, secondDevice]) {
+  device.socket.send('ping')
+  assert.equal(await device.next(), 'pong', 'failed writes must not emit changes')
+}
+const closed = [firstDevice, secondDevice].map(({ socket }) => new Promise((resolve) => socket.addEventListener('close', resolve, { once: true })))
 assert.equal((await request('logout', { method: 'POST', token })).status, 200)
+for (const event of await Promise.all(closed)) assert.equal(event.code, 1008)
 assert.equal((await request('session', { token })).status, 401)
-console.log('Cloud runtime passed: auth, origin checks, CAS, incremental changes, history, resumable multipart, parameterized SVG MIME, integrity, range reads, tombstones, logout.')
+console.log('Cloud runtime passed: auth, origin checks, WebSocket push to two devices, CAS, incremental changes, history, resumable multipart, parameterized SVG MIME, integrity, range reads, tombstones, logout and socket revocation.')
