@@ -67,7 +67,7 @@ button { touch-action: manipulation; }
 .rectangle-line { pointer-events: none; }
 .rectangle-hit { stroke: transparent; pointer-events: stroke; cursor: move; }
 .card { position: absolute; inset: 0; background: white; border: 1px solid #e9e6ed; border-radius: 10px; box-shadow: 0 2px 3px #2d243608, 0 4px 12px #2d243605; }
-.text-card { overflow: hidden; }
+.text-card { overflow: clip; }
 .card:hover { border-color: #c8d8e1; }
 .card.selected { box-shadow: 0 5px 16px #39294b18; }
 .block-wrapper.selected::after { content: ''; position: absolute; inset: 0; border-radius: 10px; background: #3199c747; pointer-events: none; z-index: 1; }
@@ -81,7 +81,7 @@ button { touch-action: manipulation; }
 .text-card[data-color='6'] { background: #eee8fa; border-color: #e1d8f2; }
 .card-text { outline: none; line-height: 1.6; white-space: pre-wrap; word-break: break-word; min-height: 1.6em; }
 .card-text:empty::before, .image-caption:empty::before { content: attr(data-placeholder); color: #b2aabc; pointer-events: none; }
-.card-text.editing { cursor: text; user-select: text; max-height: 100%; overflow-y: auto; }
+.card-text.editing { cursor: text; user-select: text; }
 .markdown-text h1, .markdown-text h2, .markdown-text h3 { margin: 0; font-size: 1em; font-weight: 700; line-height: inherit; }
 .markdown-text h1 { font-size: 1.25em; }
 .markdown-text ul { margin: .2em 0; padding-left: 1.5em; list-style: disc; }
