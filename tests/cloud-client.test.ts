@@ -330,3 +330,62 @@ test('server push refreshes an open device, retains changes arriving during a sy
     Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalSocket })
   }
 })
+
+test('expired sessions allow signing in again or signing out without losing pending edits', async () => {
+  const values = new Map<string, string>()
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
+  } })
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() })
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } })
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() })
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: Object.assign(new EventTarget(), { visibilityState: 'visible' }) })
+  const originalFetch = globalThis.fetch
+  const doc: CanvasFile = { nodes: [], edges: [], meta: { name: 'pending local edit' } }
+  let expired = false, sessionRequests = 0, uploaded: CanvasFile | null = null
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input)).pathname.replace('/api/', '')
+    if (path === 'login') { expired = false; return Response.json({ token: 'd'.repeat(64), vaultId: 'expiry-vault', username: 'owner' }) }
+    if (path === 'session') sessionRequests++
+    if (expired) return Response.json({ error: '请重新登录' }, { status: 401 })
+    if (path === 'logout') return Response.json({ ok: true })
+    if (path === 'session') return Response.json({ vaultId: 'expiry-vault' })
+    if (path === 'boards') return Response.json({ boards: [] })
+    uploaded = JSON.parse(init!.body as string).doc
+    return Response.json({ id: 'expiry-board', revision: 1, doc: uploaded })
+  }
+  const cloud = await import('../src/sync/cloud')
+  const repo = new LocalRepository()
+  await repo.save('expiry-board', doc)
+  await cloud.loginCloud('https://see.example', 'owner', 'password')
+  expired = true
+  const stop = cloud.startCloudSync(repo, () => true, async (action) => { await action(); return true })
+  try {
+    await cloud.syncNow()
+    assert.equal(cloud.cloudStore.getSnapshot().needsLogin, true)
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'error')
+    assert.equal(cloud.configuredEndpoint(), 'https://see.example')
+    assert.equal(uploaded, null)
+    const requests = sessionRequests
+    const edited = { ...doc, meta: { name: 'edited while session expired' } }
+    await repo.save('expiry-board', edited)
+    await cloud.syncNow()
+    assert.equal(sessionRequests, requests, 'expired credentials must not keep polling')
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'error', 'local saves must preserve the login prompt')
+    assert.equal((await repo.load('expiry-board'))!.meta!.name, edited.meta.name)
+    await cloud.loginCloud('https://see.example', 'owner', 'password')
+    await cloud.syncNow()
+    assert.equal(cloud.cloudStore.getSnapshot().needsLogin, false)
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+    assert.equal(uploaded!.meta!.name, edited.meta.name)
+    expired = true
+    await cloud.syncNow()
+    await cloud.logoutCloud()
+    assert.equal(cloud.cloudStore.getSnapshot().enabled, false)
+    assert.equal(values.has('see-cloud-session'), false)
+    assert.equal((await repo.load('expiry-board'))!.meta!.name, edited.meta.name)
+    assert.equal((await repo.syncEntries('expiry-vault'))[0].base!.revision, 1)
+  } finally { stop(); globalThis.fetch = originalFetch }
+})

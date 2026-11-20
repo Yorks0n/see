@@ -5,6 +5,7 @@ import { IconButton } from './IconButton'
 
 export function CloudDialog({ onClose }: { onClose: () => void }) {
   const cloud = useSyncExternalStore(cloudStore.subscribe, cloudStore.getSnapshot)
+  const signedIn = cloud.enabled && !cloud.needsLogin
   const [server, setServer] = useState(configuredEndpoint)
   const [username, setUsername] = useState(cloud.username || 'owner')
   const [password, setPassword] = useState('')
@@ -19,7 +20,7 @@ export function CloudDialog({ onClose }: { onClose: () => void }) {
           .catch((error: Error) => setError(error.message)).finally(() => setBusy(false))
       }}>
       <div className="popover-heading"><span>云端同步</span><IconButton type="button" icon={X} label="关闭同步设置" onClick={onClose} /></div>
-      {cloud.enabled ? <p>{cloud.username}</p> : <>
+      {signedIn ? <p>{cloud.username}</p> : <>
         <label>服务器<input autoFocus type="url" required value={server} onChange={(event) => setServer(event.target.value)} /></label>
         <label>账号<input autoComplete="username" required value={username} onChange={(event) => setUsername(event.target.value)} /></label>
         <label>密码<input type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
@@ -27,9 +28,9 @@ export function CloudDialog({ onClose }: { onClose: () => void }) {
       </>}
       {(error || cloud.message) && <p role="alert">{error || cloud.message}</p>}
       <div className="cloud-actions">
-        {!cloud.enabled && <button type="submit" disabled={busy}>{busy ? '正在登录…' : '登录并同步'}</button>}
+        {!signedIn && <button type="submit" disabled={busy}>{busy ? '正在登录…' : '登录并同步'}</button>}
         {cloud.enabled && <>
-          <button type="button" disabled={busy} onClick={() => { void syncNow() }}>立即同步</button>
+          {signedIn && <button type="button" disabled={busy} onClick={() => { void syncNow() }}>立即同步</button>}
           <button type="button" disabled={busy} onClick={() => {
             setBusy(true)
             void logoutCloud().then(onClose).catch((error: Error) => setError(error.message)).finally(() => setBusy(false))

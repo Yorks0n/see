@@ -5,12 +5,12 @@ import { startCloudPush } from './push'
 
 const SETTINGS_KEY = 'see-cloud-session'
 interface Session { endpoint: string; token: string; vaultId: string; username: string }
-interface State { enabled: boolean; state: 'local' | 'syncing' | 'synced' | 'offline' | 'error'; message: string; username: string }
+interface State { enabled: boolean; needsLogin: boolean; state: 'local' | 'syncing' | 'synced' | 'offline' | 'error'; message: string; username: string }
 class ApiError extends Error { constructor(public status: number, message: string, public current?: CloudBoard, public missingAssets?: string[]) { super(message) } }
-let state: State = { enabled: false, state: 'local', message: '', username: '' }
+let state: State = { enabled: false, needsLogin: false, state: 'local', message: '', username: '' }
 let session: Session | null = null
 try { session = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null') } catch { /* Local mode. */ }
-if (session?.token && session.vaultId) state = { enabled: true, state: 'offline', message: '', username: session.username }
+if (session?.token && session.vaultId) state = { enabled: true, needsLogin: false, state: 'offline', message: '', username: session.username }
 const listeners = new Set<() => void>()
 const publish = (patch: Partial<State>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()) }
 export const cloudStore = {
@@ -58,18 +58,19 @@ export async function loginCloud(server: string, username: string, password: str
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(next))
   stopPush?.(); stopPush = null; pushSession = null
   session = next
-  publish({ enabled: true, state: 'syncing', message: '', username: next.username })
+  publish({ enabled: true, needsLogin: false, state: 'syncing', message: '', username: next.username })
   schedule()
 }
 export async function logoutCloud() {
   const active = session
   if (!active) return
   if (running) await running
-  await api(active, 'logout', { method: 'POST' })
+  try { await api(active, 'logout', { method: 'POST' }) }
+  catch (error) { if (!(error instanceof ApiError && error.status === 401)) throw error }
   localStorage.removeItem(SETTINGS_KEY)
   session = null
   stopPush?.(); stopPush = null; pushSession = null
-  publish({ enabled: false, state: 'local', message: '', username: '' })
+  publish({ enabled: false, needsLogin: false, state: 'local', message: '', username: '' })
 }
 
 async function uploadAsset(active: Session, ref: string) {
@@ -132,7 +133,7 @@ export function startCloudSync(repo: LocalRepository, canApply: () => boolean, a
   listening = true
   const unsubscribe = repo.subscribe(() => {
     localGeneration++
-    if (session) publish({ state: 'offline', message: '修改已保存在本机，等待同步' })
+    if (session && !state.needsLogin) publish({ state: 'offline', message: '修改已保存在本机，等待同步' })
     schedule()
   })
   const interval = setInterval(() => { void syncNow() }, 5000)
@@ -154,10 +155,16 @@ export function startCloudSync(repo: LocalRepository, canApply: () => boolean, a
 }
 export function syncNow(): Promise<void> {
   if (running) return running
-  if (!session || !repository || !safe || !apply) return Promise.resolve()
+  if (!session || state.needsLogin || !repository || !safe || !apply) return Promise.resolve()
   const active = session
   const generation = pushGeneration
   running = synchronize(active).catch((error) => {
+    if (session !== active) return
+    if (error instanceof ApiError && error.status === 401) {
+      stopPush?.(); stopPush = null; pushSession = null
+      publish({ needsLogin: true, state: 'error', message: '登录已失效，请重新登录；本机修改仍然保留。' })
+      return
+    }
     if (error instanceof StorageConflictError) { publish({ state: 'offline', message: '本地内容正在更新，将自动重试' }); return }
     const offline = !navigator.onLine || error instanceof TypeError || (error instanceof DOMException && error.name === 'TimeoutError')
     publish({ state: offline ? 'offline' : 'error', message: offline ? '修改已保存在本机，连接恢复后继续同步' : error instanceof Error ? error.message : '同步失败' })
