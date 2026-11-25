@@ -39,6 +39,21 @@ export function textDocument(text: string): TextNode {
   }))
 }
 
+export function clipboardWebUrl(data: DataTransfer, document: Document): string | undefined {
+  const isWebUrl = (value: string) => /^https?:\/\/\S+$/i.test(value) && URL.canParse(value)
+  const uris = data.getData('text/uri-list').split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'))
+  if (uris.length === 1 && isWebUrl(uris[0])) return uris[0]
+  const html = data.getData('text/html')
+  if (!html) return
+  const template = document.createElement('template')
+  template.innerHTML = html
+  const fragment = template.content
+  const links = fragment.querySelectorAll('a[href]')
+  if (links.length !== 1 || fragment.querySelector('img, [data-pm-slice]')) return
+  const link = links[0], href = link.getAttribute('href')!.trim()
+  if (isWebUrl(href) && fragment.textContent?.trim() === link.textContent?.trim()) return href
+}
+
 function inlineText(node: TextNode) {
   let text = ''
   node.forEach((child) => {

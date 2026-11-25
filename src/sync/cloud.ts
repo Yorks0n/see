@@ -10,6 +10,7 @@ class ApiError extends Error { constructor(public status: number, message: strin
 let state: State = { enabled: false, needsLogin: false, state: 'local', message: '', username: '' }
 let session: Session | null = null
 try { session = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null') } catch { /* Local mode. */ }
+let activityPending = false
 if (session?.token && session.vaultId) state = { enabled: true, needsLogin: false, state: 'offline', message: '', username: session.username }
 const listeners = new Set<() => void>()
 const publish = (patch: Partial<State>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()) }
@@ -58,6 +59,7 @@ export async function loginCloud(server: string, username: string, password: str
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(next))
   stopPush?.(); stopPush = null; pushSession = null
   session = next
+  activityPending = false
   publish({ enabled: true, needsLogin: false, state: 'syncing', message: '', username: next.username })
   schedule()
 }
@@ -65,10 +67,13 @@ export async function logoutCloud() {
   const active = session
   if (!active) return
   if (running) await running
+  if (session !== active) return
   try { await api(active, 'logout', { method: 'POST' }) }
   catch (error) { if (!(error instanceof ApiError && error.status === 401)) throw error }
+  if (session !== active) return
   localStorage.removeItem(SETTINGS_KEY)
   session = null
+  activityPending = false
   stopPush?.(); stopPush = null; pushSession = null
   publish({ enabled: false, needsLogin: false, state: 'local', message: '', username: '' })
 }
@@ -139,6 +144,9 @@ export function startCloudSync(repo: LocalRepository, canApply: () => boolean, a
   const interval = setInterval(() => { void syncNow() }, 5000)
   const online = () => { pushGeneration++; void syncNow() }
   const visible = () => { if (document.visibilityState === 'visible') online() }
+  const activity = () => { if (session && !state.needsLogin) activityPending = true }
+  const activityEvents = ['pointerdown', 'keydown', 'wheel']
+  for (const event of activityEvents) window.addEventListener(event, activity, { capture: true, passive: true })
   window.addEventListener('online', online)
   window.addEventListener('focus', online)
   document.addEventListener('visibilitychange', visible)
@@ -146,6 +154,7 @@ export function startCloudSync(repo: LocalRepository, canApply: () => boolean, a
   return () => {
     listening = false
     unsubscribe(); clearInterval(interval)
+    for (const event of activityEvents) window.removeEventListener(event, activity, true)
     window.removeEventListener('online', online)
     window.removeEventListener('focus', online)
     document.removeEventListener('visibilitychange', visible)
@@ -161,6 +170,7 @@ export function syncNow(): Promise<void> {
   running = synchronize(active).catch((error) => {
     if (session !== active) return
     if (error instanceof ApiError && error.status === 401) {
+      activityPending = false
       stopPush?.(); stopPush = null; pushSession = null
       publish({ needsLogin: true, state: 'error', message: '登录已失效，请重新登录；本机修改仍然保留。' })
       return
@@ -176,7 +186,12 @@ export function syncNow(): Promise<void> {
 }
 async function synchronize(active: Session) {
   if (!navigator.onLine) { publish({ state: 'offline', message: '修改已保存在本机，连接恢复后继续同步' }); return }
-  const currentSession = await (await api(active, 'session')).json()
+  const renew = activityPending
+  activityPending = false
+  const currentSession = await api(active, 'session', { method: renew ? 'POST' : 'GET' }).then((response) => response.json()).catch((error) => {
+    if (renew && session === active) activityPending = true
+    throw error
+  })
   if (currentSession.vaultId !== active.vaultId) throw new Error('服务器数据仓库已变化，请重新登录')
   if (listening && session === active && currentSession.push && typeof WebSocket !== 'undefined' && pushSession !== active) {
     stopPush?.()

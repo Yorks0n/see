@@ -15,12 +15,17 @@ test('client persists offline edits, merges after reconnect, retries races and p
   Object.defineProperty(globalThis, 'document', { configurable: true, value: Object.assign(new EventTarget(), { visibilityState: 'visible' }) })
   const originalFetch = globalThis.fetch
   let connected = true, race = false, sessionError = false
+  const sessionMethods: string[] = []
   const remote = new Map<string, { id: string; revision: number; doc: CanvasFile | null }>()
   globalThis.fetch = async (input, init) => {
     if (!connected) throw new TypeError('network disconnected')
     const path = new URL(String(input)).pathname.replace('/api/', '')
     if (path === 'login') return Response.json({ token: 'a'.repeat(64), vaultId: 'vault', username: 'owner' })
-    if (path === 'session') return sessionError ? Response.json({ error: '服务器拒绝同步' }, { status: 503 }) : Response.json({ vaultId: 'vault' })
+    if (path === 'session') {
+      sessionMethods.push(init?.method ?? 'GET')
+      if (sessionError) return Response.json({ error: '服务器拒绝同步' }, { status: 503 })
+      return Response.json({ vaultId: 'vault' })
+    }
     if (path === 'boards') return Response.json({ boards: [...remote.values()].map(({ id, revision }) => ({ id, revision })) })
     const id = decodeURIComponent(path.slice('boards/'.length))
     const current = remote.get(id) ?? { id, revision: 0, doc: null }
@@ -47,12 +52,15 @@ test('client persists offline edits, merges after reconnect, retries races and p
     await cloud.syncNow()
     assert.equal(remote.get('board')!.revision, 1)
     assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+    assert.equal(sessionMethods.at(-1), 'GET')
+    window.dispatchEvent(new Event('keydown'))
     sessionError = true
     await cloud.syncNow()
     assert.equal(cloud.cloudStore.getSnapshot().state, 'error')
     assert.equal(cloud.cloudStore.getSnapshot().message, '服务器拒绝同步')
     sessionError = false
     await cloud.syncNow()
+    assert.deepEqual(sessionMethods.slice(-2), ['POST', 'POST'])
     assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
     const view = structuredClone(original)
     view.meta!.camera = { x: 120, y: -80, zoom: 2 }
@@ -62,6 +70,7 @@ test('client persists offline edits, merges after reconnect, retries races and p
     const unsubscribe = cloud.cloudStore.subscribe(() => checkStates.push(cloud.cloudStore.getSnapshot().state))
     try { await cloud.syncNow() } finally { unsubscribe() }
     assert.deepEqual(checkStates, ['synced'])
+    assert.equal(sessionMethods.at(-1), 'GET')
     assert.equal(remote.get('board')!.revision, 1)
     assert.equal(remote.get('board')!.doc!.meta!.camera, undefined)
     assert.deepEqual((await repo.load('board'))!.meta!.camera, view.meta!.camera)

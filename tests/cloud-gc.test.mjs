@@ -20,6 +20,21 @@ before(async () => {
     import worker, { SeeVault } from ${JSON.stringify(new URL('../worker/index.ts', import.meta.url).pathname)}
     export default worker
     export class TestVault extends SeeVault {
+      async sessionAt(now, method, token) {
+        const original = Date.now
+        Date.now = () => now
+        try {
+          const response = await this.fetch(new Request('https://see.test/api/session', { method, headers: { Authorization: 'Bearer ' + token } }))
+          return response.status
+        } finally { Date.now = original }
+      }
+      seedLegacySessions(sessions) {
+        this.ctx.storage.transactionSync(() => {
+          this.sql.exec('DELETE FROM settings WHERE key = ?', 'sessionIdleExpiry')
+          for (const { key, expires } of sessions) this.sql.exec('UPDATE sessions SET expires = ? WHERE token = ?', expires, key)
+        })
+      }
+      restart() { this.ctx.abort('simulated worker restart') }
       async runAlarm(now) {
         const original = Date.now
         Date.now = () => now
@@ -220,4 +235,40 @@ test('an attachment cannot be committed or reused while its R2 deletion is in fl
   assert.equal(await bucket.head(hash), null)
   assert.equal((await request('boards/racing')).status, 200)
   assert.equal((await (await request('boards/racing')).json()).revision, 0)
+})
+
+test('cloud sessions expire after 60 inactive days, with renewal limited to activity', async () => {
+  const idleTimeout = 60 * 24 * 60 * 60 * 1000
+  const started = Date.now()
+  const credentials = { username: 'owner', password: 'test-password' }
+  const idle = await (await request('login', credentials)).json()
+  const active = await (await request('login', credentials)).json()
+  assert.ok(idle.expiresAt >= started + idleTimeout && idle.expiresAt <= Date.now() + idleTimeout)
+  assert.equal(await vault.sessionAt(idle.expiresAt - 1, 'GET', idle.token), 200)
+  assert.equal(await vault.sessionAt(idle.expiresAt, 'GET', idle.token), 401)
+  assert.equal(await vault.sessionAt(idle.expiresAt, 'POST', idle.token), 401)
+
+  const activity = active.expiresAt - 1000
+  assert.equal(await vault.sessionAt(activity, 'POST', active.token), 200)
+  assert.equal(await vault.sessionAt(active.expiresAt, 'GET', active.token), 200)
+  assert.equal(await vault.sessionAt(activity + idleTimeout - 1, 'GET', active.token), 200)
+  assert.equal(await vault.sessionAt(activity + idleTimeout, 'GET', active.token), 401)
+})
+
+test('upgrading extends only live legacy sessions and applies the extension once', async () => {
+  const credentials = { username: 'owner', password: 'test-password' }
+  const { token: live } = await (await request('login', credentials)).json()
+  const { token: expired } = await (await request('login', credentials)).json()
+  const now = Date.now(), liveExpiry = now + retention
+  const digest = (token) => createHash('sha256').update(token).digest('hex')
+  const namespace = await runtime.getDurableObjectNamespace('VAULT')
+  await vault.seedLegacySessions([{ key: digest(live), expires: liveExpiry }, { key: digest(expired), expires: now - 1 }])
+  await assert.rejects(vault.restart())
+  vault = namespace.getByName('personal')
+  const migratedExpiry = now + 60 * 24 * 60 * 60 * 1000
+  assert.equal(await vault.sessionAt(migratedExpiry - 1, 'GET', live), 200)
+  assert.equal(await vault.sessionAt(now, 'GET', expired), 401)
+  await assert.rejects(vault.restart())
+  vault = namespace.getByName('personal')
+  assert.equal(await vault.sessionAt(migratedExpiry, 'GET', live), 401)
 })

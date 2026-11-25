@@ -12,6 +12,8 @@ interface Env {
 type BoardRow = { id: string; revision: number; doc: string; updated: number }
 type UploadRow = { id: string; hash: string; mime: string; size: number; created: number }
 const UPLOAD_RETENTION_MS = 24 * 60 * 60 * 1000
+const SESSION_IDLE_TIMEOUT_MS = 60 * 24 * 60 * 60 * 1000
+const LEGACY_SESSION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000
 const encoder = new TextEncoder()
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('')
 const hash = async (text: string) => hex(await crypto.subtle.digest('SHA-256', encoder.encode(text)))
@@ -61,6 +63,11 @@ export class SeeVault extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS asset_gc (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL, deleting INTEGER NOT NULL DEFAULT 0);
     `)
     this.sql.exec('INSERT OR IGNORE INTO settings VALUES (?, ?)', 'vaultId', crypto.randomUUID())
+    // The legacy deadline was based on login time. Only migrate sessions that are still valid.
+    ctx.storage.transactionSync(() => {
+      const migrated = this.sql.exec('INSERT OR IGNORE INTO settings VALUES (?, ?) RETURNING key', 'sessionIdleExpiry', '1').toArray().length
+      if (migrated) this.sql.exec('UPDATE sessions SET expires = expires + ? WHERE expires > ?', SESSION_IDLE_TIMEOUT_MS - LEGACY_SESSION_LIFETIME_MS, Date.now())
+    })
     // Existing installations start a grace period for previously untracked orphans.
     this.retainAssets()
     ctx.blockConcurrencyWhile(() => this.scheduleAlarm())
@@ -132,16 +139,20 @@ export class SeeVault extends DurableObject<Env> {
     let difference = 0
     for (let index = 0; index < expected.length; index++) difference |= expected.charCodeAt(index) ^ actual.charCodeAt(index)
     if (difference || input.username !== this.env.USERNAME) throw new HttpError(401, '账号或密码错误')
-    const token = hex(crypto.getRandomValues(new Uint8Array(32)).buffer), expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000
-    this.sql.exec('DELETE FROM sessions WHERE expires < ?', Date.now())
+    const token = hex(crypto.getRandomValues(new Uint8Array(32)).buffer), expiresAt = Date.now() + SESSION_IDLE_TIMEOUT_MS
+    this.sql.exec('DELETE FROM sessions WHERE expires <= ?', Date.now())
     this.sql.exec('INSERT INTO sessions VALUES (?, ?, ?)', await hash(token), expiresAt, await hash(this.env.PASSWORD_HASH))
     return json({ token, expiresAt, vaultId: this.vaultId, username: this.env.USERNAME })
   }
-  private async authenticate(request: Request, token = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1]) {
+  private hasSession(token: string, passwordVersion: string, now = Date.now()) {
+    return this.sql.exec('SELECT token FROM sessions WHERE token = ? AND password_version = ? AND expires > ?', token, passwordVersion, now).toArray().length > 0
+  }
+  private async authenticate(request: Request, token = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1], renew = false) {
     if (!token || !this.env.PASSWORD_HASH) throw new HttpError(401, '请重新登录')
-    const key = await hash(token)
-    const session = this.sql.exec<{ expires: number; password_version: string }>('SELECT expires, password_version FROM sessions WHERE token = ?', key).toArray()[0]
-    if (!session || session.expires < Date.now() || session.password_version !== await hash(this.env.PASSWORD_HASH)) throw new HttpError(401, '请重新登录')
+    const [key, passwordVersion] = await Promise.all([hash(token), hash(this.env.PASSWORD_HASH)])
+    const now = Date.now()
+    if (!this.hasSession(key, passwordVersion, now)) throw new HttpError(401, '请重新登录')
+    if (renew) this.sql.exec('UPDATE sessions SET expires = MAX(expires, ?) WHERE token = ?', now + SESSION_IDLE_TIMEOUT_MS, key)
     return key
   }
   private async broadcast(id: string, revision: number) {
@@ -150,8 +161,7 @@ export class SeeVault extends DurableObject<Env> {
     const message = JSON.stringify({ type: 'changed', id, revision })
     for (const socket of this.ctx.getWebSockets()) {
       const { token } = socket.deserializeAttachment() as { token: string }
-      const session = this.sql.exec<{ expires: number; password_version: string }>('SELECT expires, password_version FROM sessions WHERE token = ?', token).toArray()[0]
-      if (!session || session.expires < Date.now() || session.password_version !== passwordVersion) { socket.close(1008, '请重新登录'); continue }
+      if (!this.hasSession(token, passwordVersion)) { socket.close(1008, '请重新登录'); continue }
       try { socket.send(message) } catch { socket.close(1011, '连接已断开') }
     }
   }
@@ -162,9 +172,11 @@ export class SeeVault extends DurableObject<Env> {
     server.send(JSON.stringify({ type: 'ready' }))
     return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Protocol': 'see-sync' } })
   }
-  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) {
-    if (message === 'ping') socket.send('pong')
-    else socket.close(1008, '无效的消息')
+  async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) {
+    if (message !== 'ping') { socket.close(1008, '无效的消息'); return }
+    const { token } = socket.deserializeAttachment() as { token: string }
+    if (!this.env.PASSWORD_HASH || !this.hasSession(token, await hash(this.env.PASSWORD_HASH))) { socket.close(1008, '请重新登录'); return }
+    socket.send('pong')
   }
   webSocketClose(socket: WebSocket, code: number, reason: string) { socket.close(code, reason) }
   webSocketError(socket: WebSocket) { socket.close(1011, '连接已断开') }
@@ -287,12 +299,13 @@ export class SeeVault extends DurableObject<Env> {
       const events = path[1] === 'events' && method === 'GET'
       const protocols = events ? request.headers.get('Sec-WebSocket-Protocol')?.split(',').map((value) => value.trim()) ?? [] : []
       const credential = protocols.find((value) => /^see-auth\.[a-f0-9]{64}$/.test(value))?.slice('see-auth.'.length)
-      const token = await this.authenticate(request, events ? credential : undefined)
+      const renew = path[1] === 'session' && method === 'POST'
+      const token = await this.authenticate(request, events ? credential : undefined, renew)
       if (events) {
         if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket' || !protocols.includes('see-sync')) throw new HttpError(426, '需要 WebSocket 连接')
         return this.connectEvents(token)
       }
-      if (path[1] === 'session' && method === 'GET') return json({ vaultId: this.vaultId, username: this.env.USERNAME, changes: true, push: true })
+      if (path[1] === 'session' && (method === 'GET' || renew)) return json({ vaultId: this.vaultId, username: this.env.USERNAME, changes: true, push: true })
       if (path[1] === 'logout' && method === 'POST') {
         this.sql.exec('DELETE FROM sessions WHERE token = ?', token)
         for (const socket of this.ctx.getWebSockets(token)) socket.close(1008, '已退出登录')
@@ -331,7 +344,7 @@ export class SeeVault extends DurableObject<Env> {
         this.sql.exec('DELETE FROM parts WHERE upload = ?', row.id)
         this.sql.exec('DELETE FROM uploads WHERE id = ?', row.id)
       }
-      this.sql.exec('DELETE FROM sessions WHERE expires < ?', Date.now())
+      this.sql.exec('DELETE FROM sessions WHERE expires <= ?', Date.now())
       await this.collectAssets()
     } finally {
       await this.scheduleAlarm()

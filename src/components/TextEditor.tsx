@@ -3,7 +3,7 @@ import { Slice } from 'prosemirror-model'
 import { EditorState, TextSelection } from 'prosemirror-state'
 import { EditorView } from 'prosemirror-view'
 import { documentStore } from '../store/document'
-import { textDocument, textMarkdown, textPlugins } from '../tools/textEditor'
+import { clipboardWebUrl, textDocument, textMarkdown, textPlugins } from '../tools/textEditor'
 
 export function TextEditor({ text, editing, style, onChange, onDone }: {
   text: string; editing: boolean; style: React.CSSProperties
@@ -40,6 +40,15 @@ export function TextEditor({ text, editing, style, onChange, onDone }: {
         return false
       },
       handleDOMEvents: {
+        paste(view, event) {
+          if (!view.editable || view.composing || !event.clipboardData) return false
+          const url = clipboardWebUrl(event.clipboardData, view.dom.ownerDocument)
+          if (!url) return false
+          event.preventDefault()
+          view.dispatch(view.state.tr.replaceSelectionWith(view.state.schema.text(url), false)
+            .scrollIntoView().setMeta('paste', true).setMeta('uiEvent', 'paste'))
+          return true
+        },
         blur() {
           if (latest.current.editing) { latest.current.onDone(draft.current); documentStore.endInteraction() }
           return false
