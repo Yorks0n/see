@@ -305,7 +305,7 @@ export class SeeVault extends DurableObject<Env> {
         if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket' || !protocols.includes('see-sync')) throw new HttpError(426, '需要 WebSocket 连接')
         return this.connectEvents(token)
       }
-      if (path[1] === 'session' && (method === 'GET' || renew)) return json({ vaultId: this.vaultId, username: this.env.USERNAME, changes: true, push: true })
+      if (path[1] === 'session' && (method === 'GET' || renew)) return json({ vaultId: this.vaultId, username: this.env.USERNAME, changes: true, push: true, sessionRenewal: true })
       if (path[1] === 'logout' && method === 'POST') {
         this.sql.exec('DELETE FROM sessions WHERE token = ?', token)
         for (const socket of this.ctx.getWebSockets(token)) socket.close(1008, '已退出登录')

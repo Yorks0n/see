@@ -11,6 +11,7 @@ let state: State = { enabled: false, needsLogin: false, state: 'local', message:
 let session: Session | null = null
 try { session = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null') } catch { /* Local mode. */ }
 let activityPending = false
+let supportsSessionRenewal = false
 if (session?.token && session.vaultId) state = { enabled: true, needsLogin: false, state: 'offline', message: '', username: session.username }
 const listeners = new Set<() => void>()
 const publish = (patch: Partial<State>) => { state = { ...state, ...patch }; listeners.forEach((listener) => listener()) }
@@ -60,6 +61,7 @@ export async function loginCloud(server: string, username: string, password: str
   stopPush?.(); stopPush = null; pushSession = null
   session = next
   activityPending = false
+  supportsSessionRenewal = false
   publish({ enabled: true, needsLogin: false, state: 'syncing', message: '', username: next.username })
   schedule()
 }
@@ -74,6 +76,7 @@ export async function logoutCloud() {
   localStorage.removeItem(SETTINGS_KEY)
   session = null
   activityPending = false
+  supportsSessionRenewal = false
   stopPush?.(); stopPush = null; pushSession = null
   publish({ enabled: false, needsLogin: false, state: 'local', message: '', username: '' })
 }
@@ -186,14 +189,19 @@ export function syncNow(): Promise<void> {
 }
 async function synchronize(active: Session) {
   if (!navigator.onLine) { publish({ state: 'offline', message: '修改已保存在本机，连接恢复后继续同步' }); return }
-  const renew = activityPending
-  activityPending = false
+  const renew = supportsSessionRenewal && activityPending
+  if (renew) activityPending = false
   const currentSession = await api(active, 'session', { method: renew ? 'POST' : 'GET' }).then((response) => response.json()).catch((error) => {
-    if (renew && session === active) activityPending = true
-    throw error
+    if (!renew) throw error
+    if (session === active) activityPending = true
+    if (!(error instanceof ApiError) || ![404, 405].includes(error.status)) throw error
+    if (session === active) supportsSessionRenewal = false
+    return api(active, 'session').then((response) => response.json())
   })
+  if (session !== active) return
   if (currentSession.vaultId !== active.vaultId) throw new Error('服务器数据仓库已变化，请重新登录')
-  if (listening && session === active && currentSession.push && typeof WebSocket !== 'undefined' && pushSession !== active) {
+  supportsSessionRenewal = currentSession.sessionRenewal === true
+  if (listening && currentSession.push && typeof WebSocket !== 'undefined' && pushSession !== active) {
     stopPush?.()
     pushSession = active
     stopPush = startCloudPush(active.endpoint, active.token, () => { pushGeneration++; schedule(0) })

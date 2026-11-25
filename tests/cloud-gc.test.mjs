@@ -239,6 +239,7 @@ test('an attachment cannot be committed or reused while its R2 deletion is in fl
 
 test('cloud sessions expire after 60 inactive days, with renewal limited to activity', async () => {
   const idleTimeout = 60 * 24 * 60 * 60 * 1000
+  assert.equal((await (await request('session')).json()).sessionRenewal, true)
   const started = Date.now()
   const credentials = { username: 'owner', password: 'test-password' }
   const idle = await (await request('login', credentials)).json()

@@ -14,7 +14,7 @@ test('client persists offline edits, merges after reconnect, retries races and p
   Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() })
   Object.defineProperty(globalThis, 'document', { configurable: true, value: Object.assign(new EventTarget(), { visibilityState: 'visible' }) })
   const originalFetch = globalThis.fetch
-  let connected = true, race = false, sessionError = false
+  let connected = true, race = false, sessionError = false, sessionRenewal = true
   const sessionMethods: string[] = []
   const remote = new Map<string, { id: string; revision: number; doc: CanvasFile | null }>()
   globalThis.fetch = async (input, init) => {
@@ -22,9 +22,11 @@ test('client persists offline edits, merges after reconnect, retries races and p
     const path = new URL(String(input)).pathname.replace('/api/', '')
     if (path === 'login') return Response.json({ token: 'a'.repeat(64), vaultId: 'vault', username: 'owner' })
     if (path === 'session') {
-      sessionMethods.push(init?.method ?? 'GET')
+      const method = init?.method ?? 'GET'
+      sessionMethods.push(method)
+      if (method === 'POST' && !sessionRenewal) return Response.json({ error: '接口不存在' }, { status: 404 })
       if (sessionError) return Response.json({ error: '服务器拒绝同步' }, { status: 503 })
-      return Response.json({ vaultId: 'vault' })
+      return Response.json({ vaultId: 'vault', ...(sessionRenewal ? { sessionRenewal: true } : {}) })
     }
     if (path === 'boards') return Response.json({ boards: [...remote.values()].map(({ id, revision }) => ({ id, revision })) })
     const id = decodeURIComponent(path.slice('boards/'.length))
@@ -62,6 +64,20 @@ test('client persists offline edits, merges after reconnect, retries races and p
     await cloud.syncNow()
     assert.deepEqual(sessionMethods.slice(-2), ['POST', 'POST'])
     assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+
+    const beforeFallback = sessionMethods.length
+    sessionRenewal = false
+    window.dispatchEvent(new Event('pointerdown'))
+    await cloud.syncNow()
+    assert.equal(cloud.cloudStore.getSnapshot().state, 'synced')
+    window.dispatchEvent(new Event('pointerdown'))
+    await cloud.syncNow()
+    assert.deepEqual(sessionMethods.slice(beforeFallback), ['POST', 'GET', 'GET'])
+    sessionRenewal = true
+    await cloud.syncNow()
+    await cloud.syncNow()
+    assert.deepEqual(sessionMethods.slice(beforeFallback), ['POST', 'GET', 'GET', 'GET', 'POST'])
+
     const view = structuredClone(original)
     view.meta!.camera = { x: 120, y: -80, zoom: 2 }
     await repo.save('board', view)
